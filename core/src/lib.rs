@@ -2,6 +2,6 @@
 //!
 //! This crate contains the core implementation of HyprDrive's VDFS:
 //! domain models, operations (CQRS), infrastructure (DB, events, jobs),
-//! and high-level services (sync, network, media).
+//! and high-level services (sync, network, media processing).
 
 pub mod domain;

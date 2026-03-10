@@ -13,6 +13,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+roaring = { version = "0.10", features = ["serde"] }
+ulid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
