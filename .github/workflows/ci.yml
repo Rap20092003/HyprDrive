@@ -48,8 +48,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Test (nextest)
+        run: cargo nextest run --workspace
 
       - name: Build daemon
         run: cargo build -p hyprdrive-daemon
