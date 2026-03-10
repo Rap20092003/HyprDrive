@@ -1,0 +1,6 @@
+[package]
+name = "hyprdrive-disk-intelligence"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

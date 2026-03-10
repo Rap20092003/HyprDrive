@@ -1,0 +1,25 @@
+{
+  "name": "hyprdrive",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HyprDrive — Virtual Distributed File System",
+  "workspaces": [
+    "packages/*",
+    "apps/tauri",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "check": "turbo check",
+    "clean": "turbo clean"
+  },
+  "devDependencies": {
+    "turbo": "^2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@11.9.0"
+}

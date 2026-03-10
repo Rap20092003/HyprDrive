@@ -1,0 +1,43 @@
+# HyprDrive — Virtual Distributed File System
+# "The personal data OS"
+
+# Build artifacts
+/target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Node.js (for frontend packages)
+node_modules/
+dist/
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Binary artifacts
+*.exe
+*.dll
+*.so
+*.dylib

@@ -1,0 +1,15 @@
+[package]
+name = "hyprdrive-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hyprdrive-daemon"
+path = "src/main.rs"
+
+[dependencies]
+hyprdrive-core = { path = "../../core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

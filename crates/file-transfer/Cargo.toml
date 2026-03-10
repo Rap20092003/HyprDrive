@@ -1,0 +1,6 @@
+[package]
+name = "hyprdrive-file-transfer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "hyprdrive-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hyprdrive-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }

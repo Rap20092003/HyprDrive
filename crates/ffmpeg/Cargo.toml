@@ -1,0 +1,6 @@
+[package]
+name = "hyprdrive-ffmpeg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

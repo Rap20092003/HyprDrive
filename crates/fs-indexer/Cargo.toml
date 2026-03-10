@@ -1,0 +1,6 @@
+[package]
+name = "hyprdrive-fs-indexer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "hyprdrive-helper-macos"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hyprdrive-helper-macos"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }

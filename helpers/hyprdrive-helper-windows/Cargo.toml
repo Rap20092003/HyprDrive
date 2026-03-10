@@ -1,0 +1,11 @@
+[package]
+name = "hyprdrive-helper-windows"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "hyprdrive-helper-windows"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
