@@ -155,9 +155,18 @@ macro_rules! define_id {
     };
 }
 
-define_id!(LocationId, "Identifies a file/folder location within a volume.");
-define_id!(VolumeId, "Identifies a mounted volume (drive, partition, cloud bucket).");
-define_id!(LibraryId, "Identifies a user library (collection of indexed locations).");
+define_id!(
+    LocationId,
+    "Identifies a file/folder location within a volume."
+);
+define_id!(
+    VolumeId,
+    "Identifies a mounted volume (drive, partition, cloud bucket)."
+);
+define_id!(
+    LibraryId,
+    "Identifies a user library (collection of indexed locations)."
+);
 define_id!(DeviceId, "Identifies a device in the HyprDrive network.");
 define_id!(TagId, "Identifies a semantic tag.");
 

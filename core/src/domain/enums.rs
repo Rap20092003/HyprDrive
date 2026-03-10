@@ -132,13 +132,13 @@ impl FileCategory {
 
             // Code
             "rs" | "py" | "js" | "ts" | "jsx" | "tsx" | "html" | "css" | "c" | "cpp" | "h"
-            | "hpp" | "java" | "go" | "rb" | "php" | "swift" | "kt" | "scala" | "zig"
-            | "toml" | "yaml" | "yml" | "json" | "xml" | "sh" | "bash" | "ps1" | "sql"
-            | "graphql" | "proto" | "lua" | "dart" => Self::Code,
+            | "hpp" | "java" | "go" | "rb" | "php" | "swift" | "kt" | "scala" | "zig" | "toml"
+            | "yaml" | "yml" | "json" | "xml" | "sh" | "bash" | "ps1" | "sql" | "graphql"
+            | "proto" | "lua" | "dart" => Self::Code,
 
             // Archive
-            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" | "lzma"
-            | "cab" | "iso" | "dmg" => Self::Archive,
+            "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" | "lzma" | "cab"
+            | "iso" | "dmg" => Self::Archive,
 
             // Executable
             "exe" | "msi" | "app" | "deb" | "rpm" | "appimage" | "snap" | "flatpak" | "dll"
@@ -236,7 +236,10 @@ mod tests {
         assert_eq!(FileCategory::from_extension("tar"), FileCategory::Archive);
 
         // Executable
-        assert_eq!(FileCategory::from_extension("exe"), FileCategory::Executable);
+        assert_eq!(
+            FileCategory::from_extension("exe"),
+            FileCategory::Executable
+        );
 
         // Font
         assert_eq!(FileCategory::from_extension("ttf"), FileCategory::Font);

@@ -83,11 +83,8 @@ impl VectorClock {
     /// - `Some(Equal)` if identical
     /// - `None` if concurrent (neither before nor after)
     pub fn partial_order(&self, other: &VectorClock) -> Option<Ordering> {
-        let all_keys: std::collections::BTreeSet<&DeviceId> = self
-            .entries
-            .keys()
-            .chain(other.entries.keys())
-            .collect();
+        let all_keys: std::collections::BTreeSet<&DeviceId> =
+            self.entries.keys().chain(other.entries.keys()).collect();
 
         let mut has_less = false;
         let mut has_greater = false;
