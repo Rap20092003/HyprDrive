@@ -26,7 +26,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/hyprdrive/hyprdrive"
+repository = "https://github.com/Rap20092003/HyprDrive"
 rust-version = "1.80"
 
 [workspace.dependencies]
