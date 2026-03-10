@@ -57,6 +57,13 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+redb = "2"
+
+# Testing utilities
+tempfile = "3"
+
 [profile.dev]
 opt-level = 0
 debug = true

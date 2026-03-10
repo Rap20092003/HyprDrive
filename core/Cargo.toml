@@ -15,9 +15,12 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 roaring = { version = "0.10", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
+sqlx = { workspace = true }
+redb = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "benchmarks"

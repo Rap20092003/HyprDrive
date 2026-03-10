@@ -1,0 +1,350 @@
+#![allow(clippy::result_large_err)]
+//! redb caches for hot-path lookups.
+//!
+//! Five typed caches per the plan (§2.4):
+//! 1. INODE_CACHE: (vol, inode, mtime) → object_id
+//! 2. THUMB_MANIFEST: object_id → ThumbRecord
+//! 3. QUERY_CACHE: query_hash → serialized result
+//! 4. XFER_CHECKPOINTS: transfer_id → checkpoint
+//! 5. DIR_SIZE_CACHE: location_id → DirSizeRecord
+
+use redb::{Database, TableDefinition};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+// ═══ Table Definitions ═══
+
+/// Inode cache: key = "vol:inode:mtime", value = object_id
+const INODE_CACHE: TableDefinition<&str, &str> = TableDefinition::new("inode_cache");
+
+/// Thumbnail manifest: key = object_id, value = JSON ThumbRecord
+const THUMB_MANIFEST: TableDefinition<&str, &str> = TableDefinition::new("thumb_manifest");
+
+/// Query cache: key = query_hash, value = serialized result
+#[allow(dead_code)] // Used in Phase 9 (CQRS query caching)
+const QUERY_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("query_cache");
+
+/// Transfer checkpoints: key = transfer_id, value = JSON checkpoint
+const XFER_CHECKPOINTS: TableDefinition<&str, &str> = TableDefinition::new("xfer_checkpoints");
+
+/// Directory size cache: key = location_id, value = JSON DirSizeRecord
+const DIR_SIZE_CACHE: TableDefinition<&str, &str> = TableDefinition::new("dir_size_cache");
+
+// ═══ Types ═══
+
+/// Thumbnail record stored in the manifest cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbRecord {
+    /// Path to the thumbnail file
+    pub path: String,
+    /// Width in pixels
+    pub width: u32,
+    /// Height in pixels
+    pub height: u32,
+    /// Size in bytes
+    pub size: u64,
+}
+
+/// Directory size record stored in the cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirSizeRecord {
+    /// Number of files
+    pub file_count: u64,
+    /// Total bytes
+    pub total_bytes: u64,
+    /// Cumulative allocated bytes
+    pub cumulative_allocated: u64,
+}
+
+// ═══ Cache Operations ═══
+
+/// Open or create the redb cache database.
+pub fn open_cache(cache_path: &Path) -> Result<Database, redb::DatabaseError> {
+    Database::create(cache_path)
+}
+
+/// Inode cache operations.
+pub mod inode {
+    use super::*;
+
+    /// Build a cache key from volume, inode, and mtime.
+    pub fn cache_key(volume_id: &str, inode: u64, mtime: i64) -> String {
+        format!("{volume_id}:{inode}:{mtime}")
+    }
+
+    /// Insert an entry into the inode cache.
+    pub fn insert(db: &Database, key: &str, object_id: &str) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(INODE_CACHE)?;
+            table.insert(key, object_id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Look up an object_id by inode cache key.
+    pub fn get(db: &Database, key: &str) -> Result<Option<String>, redb::Error> {
+        let txn = db.begin_read()?;
+        match txn.open_table(INODE_CACHE) {
+            Ok(table) => {
+                let result = table.get(key)?;
+                Ok(result.map(|v| v.value().to_string()))
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Thumbnail manifest operations.
+pub mod thumb {
+    use super::*;
+
+    /// Insert a thumb record.
+    pub fn insert(db: &Database, object_id: &str, record: &ThumbRecord) -> Result<(), redb::Error> {
+        let json = serde_json::to_string(record).map_err(|e| {
+            redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(THUMB_MANIFEST)?;
+            table.insert(object_id, json.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Look up a thumb record.
+    pub fn get(db: &Database, object_id: &str) -> Result<Option<ThumbRecord>, redb::Error> {
+        let txn = db.begin_read()?;
+        match txn.open_table(THUMB_MANIFEST) {
+            Ok(table) => match table.get(object_id)? {
+                Some(v) => {
+                    let record: ThumbRecord = serde_json::from_str(v.value()).map_err(|e| {
+                        redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    })?;
+                    Ok(Some(record))
+                }
+                None => Ok(None),
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Transfer checkpoint operations.
+pub mod xfer {
+    use super::*;
+
+    /// Insert or update a checkpoint.
+    pub fn upsert(
+        db: &Database,
+        transfer_id: &str,
+        checkpoint_json: &str,
+    ) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(XFER_CHECKPOINTS)?;
+            table.insert(transfer_id, checkpoint_json)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get a checkpoint.
+    pub fn get(db: &Database, transfer_id: &str) -> Result<Option<String>, redb::Error> {
+        let txn = db.begin_read()?;
+        match txn.open_table(XFER_CHECKPOINTS) {
+            Ok(table) => Ok(table.get(transfer_id)?.map(|v| v.value().to_string())),
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Delete a checkpoint.
+    pub fn delete(db: &Database, transfer_id: &str) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(XFER_CHECKPOINTS)?;
+            table.remove(transfer_id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+}
+
+/// Directory size cache operations.
+pub mod dir_size {
+    use super::*;
+
+    /// Insert or update a directory size record.
+    pub fn upsert(
+        db: &Database,
+        location_id: &str,
+        record: &DirSizeRecord,
+    ) -> Result<(), redb::Error> {
+        let json = serde_json::to_string(record).map_err(|e| {
+            redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(DIR_SIZE_CACHE)?;
+            table.insert(location_id, json.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get a directory size record.
+    pub fn get(db: &Database, location_id: &str) -> Result<Option<DirSizeRecord>, redb::Error> {
+        let txn = db.begin_read()?;
+        match txn.open_table(DIR_SIZE_CACHE) {
+            Ok(table) => match table.get(location_id)? {
+                Some(v) => {
+                    let record: DirSizeRecord = serde_json::from_str(v.value()).map_err(|e| {
+                        redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    })?;
+                    Ok(Some(record))
+                }
+                None => Ok(None),
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn test_db() -> (Database, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let db = Database::create(dir.path().join("cache.redb")).expect("create db");
+        (db, dir)
+    }
+
+    // ═══ Inode Cache Tests ═══
+
+    #[test]
+    fn test_inode_insert_and_hit() {
+        let (db, _dir) = test_db();
+        let key = inode::cache_key("vol1", 12345, 1700000000);
+        inode::insert(&db, &key, "obj_abc123").expect("insert");
+        let result = inode::get(&db, &key).expect("get");
+        assert_eq!(result.as_deref(), Some("obj_abc123"));
+    }
+
+    #[test]
+    fn test_inode_miss() {
+        let (db, _dir) = test_db();
+        let result = inode::get(&db, "nonexistent").expect("get");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_inode_overwrite() {
+        let (db, _dir) = test_db();
+        let key = inode::cache_key("vol1", 12345, 1700000000);
+        inode::insert(&db, &key, "obj_old").expect("insert");
+        inode::insert(&db, &key, "obj_new").expect("overwrite");
+        let result = inode::get(&db, &key).expect("get");
+        assert_eq!(result.as_deref(), Some("obj_new"));
+    }
+
+    // ═══ Thumb Manifest Tests ═══
+
+    #[test]
+    fn test_thumb_insert_and_lookup() {
+        let (db, _dir) = test_db();
+        let record = ThumbRecord {
+            path: "/thumbs/abc.webp".to_string(),
+            width: 256,
+            height: 256,
+            size: 8192,
+        };
+        thumb::insert(&db, "obj1", &record).expect("insert");
+        let result = thumb::get(&db, "obj1").expect("get");
+        assert!(result.is_some());
+        let r = result.expect("some");
+        assert_eq!(r.width, 256);
+        assert_eq!(r.path, "/thumbs/abc.webp");
+    }
+
+    #[test]
+    fn test_thumb_miss() {
+        let (db, _dir) = test_db();
+        let result = thumb::get(&db, "nonexistent").expect("get");
+        assert!(result.is_none());
+    }
+
+    // ═══ Transfer Checkpoint Tests ═══
+
+    #[test]
+    fn test_xfer_insert_and_get() {
+        let (db, _dir) = test_db();
+        xfer::upsert(&db, "xfer1", r#"{"chunks_done": [0,1,2]}"#).expect("upsert");
+        let result = xfer::get(&db, "xfer1").expect("get");
+        assert!(result.is_some());
+        assert!(result.expect("some").contains("chunks_done"));
+    }
+
+    #[test]
+    fn test_xfer_update() {
+        let (db, _dir) = test_db();
+        xfer::upsert(&db, "xfer1", r#"{"chunks_done": [0]}"#).expect("insert");
+        xfer::upsert(&db, "xfer1", r#"{"chunks_done": [0,1,2]}"#).expect("update");
+        let result = xfer::get(&db, "xfer1").expect("get").expect("some");
+        assert!(result.contains("[0,1,2]"));
+    }
+
+    #[test]
+    fn test_xfer_delete() {
+        let (db, _dir) = test_db();
+        xfer::upsert(&db, "xfer1", "{}").expect("insert");
+        xfer::delete(&db, "xfer1").expect("delete");
+        let result = xfer::get(&db, "xfer1").expect("get");
+        assert!(result.is_none());
+    }
+
+    // ═══ Dir Size Cache Tests ═══
+
+    #[test]
+    fn test_dir_size_insert_and_get() {
+        let (db, _dir) = test_db();
+        let record = DirSizeRecord {
+            file_count: 42,
+            total_bytes: 1024 * 1024,
+            cumulative_allocated: 2 * 1024 * 1024,
+        };
+        dir_size::upsert(&db, "loc1", &record).expect("upsert");
+        let result = dir_size::get(&db, "loc1").expect("get").expect("some");
+        assert_eq!(result.file_count, 42);
+        assert_eq!(result.cumulative_allocated, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_dir_size_update_cumulative() {
+        let (db, _dir) = test_db();
+        let r1 = DirSizeRecord {
+            file_count: 10,
+            total_bytes: 1000,
+            cumulative_allocated: 2000,
+        };
+        dir_size::upsert(&db, "loc1", &r1).expect("insert");
+
+        let r2 = DirSizeRecord {
+            file_count: 20,
+            total_bytes: 2000,
+            cumulative_allocated: 5000,
+        };
+        dir_size::upsert(&db, "loc1", &r2).expect("update");
+
+        let result = dir_size::get(&db, "loc1").expect("get").expect("some");
+        assert_eq!(result.file_count, 20);
+        assert_eq!(result.cumulative_allocated, 5000);
+    }
+}
