@@ -3,7 +3,7 @@
 //! Composes the two-phase approach into a single `full_scan` function.
 
 use crate::error::{FsIndexerError, FsIndexerResult};
-use crate::platform::windows::{detect, enrich, mft};
+use crate::platform::windows::{detect, enrich, mft, usn};
 use crate::types::{FilesystemKind, IndexEntry, ScanResult};
 use chrono::Utc;
 use std::path::Path;
@@ -68,11 +68,16 @@ pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         "full scan complete"
     );
 
-    // TODO: Read USN journal cursor position for subsequent delta queries
-    Ok(ScanResult {
-        entries,
-        cursor: None, // populated by usn::read_cursor after first scan
-    })
+    // Read USN journal cursor for subsequent delta queries
+    let cursor = match usn::read_cursor(volume) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read USN cursor — delta queries unavailable");
+            None
+        }
+    };
+
+    Ok(ScanResult { entries, cursor })
 }
 
 /// Fallback scan using `jwalk` for non-NTFS volumes or non-admin runs.
@@ -86,6 +91,8 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
 
     let mut entries = Vec::new();
     let mut fid_counter: u64 = MIN_SYNTHETIC_FID;
+    // Map directory paths to their synthetic fids for accurate parent lookups
+    let mut dir_fid_map = std::collections::HashMap::<std::path::PathBuf, u64>::new();
 
     for dir_entry_result in jwalk::WalkDir::new(volume)
         .skip_hidden(false)
@@ -129,8 +136,20 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         let fid = fid_counter;
         fid_counter += 1;
 
-        // Determine parent fid (approximate — jwalk doesn't give FRNs)
-        let parent_fid = if dir_entry.depth() == 0 { fid } else { fid.saturating_sub(1) };
+        // Look up parent fid from directory path map
+        let parent_fid = if dir_entry.depth() == 0 {
+            fid // root entry: parent is self
+        } else {
+            full_path
+                .parent()
+                .and_then(|p| dir_fid_map.get(p).copied())
+                .unwrap_or(MIN_SYNTHETIC_FID) // fallback to volume root fid
+        };
+
+        // Register directories so children can find their parent
+        if metadata.is_dir() {
+            dir_fid_map.insert(full_path.clone(), fid);
+        }
 
         entries.push(IndexEntry {
             fid,

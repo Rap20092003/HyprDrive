@@ -810,6 +810,7 @@ name = "hyprdrive-fs-indexer"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "criterion",
  "jwalk",
  "serde",
  "serde_json",
