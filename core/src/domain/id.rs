@@ -169,6 +169,7 @@ define_id!(
 );
 define_id!(DeviceId, "Identifies a device in the HyprDrive network.");
 define_id!(TagId, "Identifies a semantic tag.");
+define_id!(VirtualFolderId, "Identifies a virtual folder (saved filter query).");
 
 #[cfg(test)]
 mod tests {
@@ -176,12 +177,13 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn object_id_from_bytes_display_roundtrip() {
+    fn object_id_from_bytes_display_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = [42u8; 32];
         let id = ObjectId::from_bytes(bytes);
         let hex = id.to_string();
-        let parsed: ObjectId = hex.parse().ok().unwrap(); // unwrap intentionally in test-only
+        let parsed: ObjectId = hex.parse()?;
         assert_eq!(id, parsed);
+        Ok(())
     }
 
     #[test]
@@ -200,36 +202,38 @@ mod tests {
     }
 
     #[test]
-    fn all_id_types_serde_roundtrip() {
+    fn all_id_types_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let obj = ObjectId::from_blake3(b"test");
-        let json = serde_json::to_string(&obj).ok().unwrap(); // unwrap intentionally in test-only
-        let back: ObjectId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&obj)?;
+        let back: ObjectId = serde_json::from_str(&json)?;
         assert_eq!(obj, back);
 
         let loc = LocationId::new();
-        let json = serde_json::to_string(&loc).ok().unwrap();
-        let back: LocationId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&loc)?;
+        let back: LocationId = serde_json::from_str(&json)?;
         assert_eq!(loc, back);
 
         let vol = VolumeId::new();
-        let json = serde_json::to_string(&vol).ok().unwrap();
-        let back: VolumeId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&vol)?;
+        let back: VolumeId = serde_json::from_str(&json)?;
         assert_eq!(vol, back);
 
         let lib = LibraryId::new();
-        let json = serde_json::to_string(&lib).ok().unwrap();
-        let back: LibraryId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&lib)?;
+        let back: LibraryId = serde_json::from_str(&json)?;
         assert_eq!(lib, back);
 
         let dev = DeviceId::new();
-        let json = serde_json::to_string(&dev).ok().unwrap();
-        let back: DeviceId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&dev)?;
+        let back: DeviceId = serde_json::from_str(&json)?;
         assert_eq!(dev, back);
 
         let tag = TagId::new();
-        let json = serde_json::to_string(&tag).ok().unwrap();
-        let back: TagId = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&tag)?;
+        let back: TagId = serde_json::from_str(&json)?;
         assert_eq!(tag, back);
+
+        Ok(())
     }
 
     #[test]

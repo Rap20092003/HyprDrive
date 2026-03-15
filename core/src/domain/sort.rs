@@ -80,10 +80,11 @@ mod tests {
     }
 
     #[test]
-    fn sort_field_serde_roundtrip() {
+    fn sort_field_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let field = SortField::Modified;
-        let json = serde_json::to_string(&field).ok().unwrap();
-        let back: SortField = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&field)?;
+        let back: SortField = serde_json::from_str(&json)?;
         assert_eq!(field, back);
+        Ok(())
     }
 }

@@ -17,6 +17,7 @@ use std::str::FromStr;
 /// - `busy_timeout = 5000` (wait 5s before SQLITE_BUSY)
 /// - `mmap_size = 256MB` (memory-mapped I/O for reads)
 /// - `journal_size_limit = 64MB` (auto-truncate WAL file)
+#[tracing::instrument(fields(db_path = %db_path.display()))]
 pub async fn create_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
 
@@ -37,6 +38,7 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
 }
 
 /// Run all embedded migrations against the pool.
+#[tracing::instrument(skip(pool))]
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let migrations: &[&str] = &[
         include_str!("../../migrations/001_objects.sql"),
