@@ -3,4 +3,26 @@ name = "hyprdrive-fs-indexer"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+usn-journal-rs = "0.4"
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+jwalk = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }
