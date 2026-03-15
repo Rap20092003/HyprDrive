@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_operation_serde_roundtrip() {
+    fn sync_operation_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
         let op = SyncOperation {
             id: Ulid::new(),
             device_id: DeviceId::new(),
@@ -212,8 +212,9 @@ mod tests {
             data: r#"{"from": "/a", "to": "/b"}"#.into(),
             clock: VectorClock::new(),
         };
-        let json = serde_json::to_string(&op).ok().unwrap();
-        let back: SyncOperation = serde_json::from_str(&json).ok().unwrap();
+        let json = serde_json::to_string(&op)?;
+        let back: SyncOperation = serde_json::from_str(&json)?;
         assert_eq!(op.operation, back.operation);
+        Ok(())
     }
 }
