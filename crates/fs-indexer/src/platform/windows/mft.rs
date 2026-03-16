@@ -121,7 +121,8 @@ pub fn build_parent_map(entries: &[TopoEntry]) -> std::collections::HashMap<u64,
 
 /// Reconstruct the full path from a parent map by walking up the FRN chain.
 ///
-/// Returns `None` if a broken parent chain is detected.
+/// Returns `None` if a broken parent chain is detected (orphan node
+/// whose parent is not in the map and is not a self-referencing root).
 pub fn reconstruct_path(
     fid: u64,
     parent_map: &std::collections::HashMap<u64, (u64, OsString)>,
@@ -129,6 +130,7 @@ pub fn reconstruct_path(
 ) -> Option<std::path::PathBuf> {
     let mut components = Vec::new();
     let mut current = fid;
+    let mut reached_root = false;
 
     // Walk up the parent chain (max depth to prevent infinite loops)
     for _ in 0..4096 {
@@ -137,15 +139,20 @@ pub fn reconstruct_path(
                 components.push(name.clone());
                 if *parent_fid == current {
                     // Root entry: parent == self
+                    reached_root = true;
                     break;
                 }
                 current = *parent_fid;
             }
             None => {
-                // Reached volume root or broken chain
+                // Broken chain — parent not in map
                 break;
             }
         }
+    }
+
+    if !reached_root {
+        return None;
     }
 
     components.reverse();

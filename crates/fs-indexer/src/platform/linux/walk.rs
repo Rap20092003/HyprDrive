@@ -14,11 +14,17 @@ use super::detect;
 
 /// Synthesize a stable fid from (device, inode) pair.
 ///
-/// Packs `st_dev` into upper 32 bits and `st_ino` into lower 32 bits.
-/// For 64-bit inodes (XFS, btrfs), uses lower 32 bits with the
-/// device in upper bits for disambiguation.
+/// Uses a deterministic hash to combine full 64-bit device and inode values.
+/// This avoids truncation of 64-bit inodes on XFS/btrfs, which would cause
+/// collisions when inode numbers differ only in the upper 32 bits.
+///
+/// The hash is stable across process restarts (fixed seed, not randomized).
 pub(crate) fn make_fid(dev: u64, ino: u64) -> u64 {
-    (dev << 32) | (ino & 0xFFFF_FFFF)
+    // Use a simple but collision-resistant mixing function.
+    // We XOR the device with a large prime then combine with the full inode.
+    // This preserves all 64 bits of ino and mixes in dev.
+    let dev_mixed = dev.wrapping_mul(0x517c_c1b7_2722_0a95); // large odd constant
+    dev_mixed ^ ino
 }
 
 /// Walk a directory tree, returning topology entries with inode-based fids.
@@ -134,9 +140,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn make_fid_packs_correctly() {
-        let fid = make_fid(1, 42);
-        assert_eq!(fid, (1_u64 << 32) | 42);
+    fn make_fid_deterministic() {
+        let fid1 = make_fid(1, 42);
+        let fid2 = make_fid(1, 42);
+        assert_eq!(fid1, fid2, "same inputs should produce same fid");
+    }
+
+    #[test]
+    fn make_fid_preserves_64bit_inodes() {
+        // Two inodes that differ only in upper 32 bits — must NOT collide
+        let fid1 = make_fid(1, 0x1_0000_0001);
+        let fid2 = make_fid(1, 0x2_0000_0001);
+        assert_ne!(
+            fid1, fid2,
+            "64-bit inodes differing in upper bits must not collide"
+        );
     }
 
     #[test]

@@ -46,11 +46,23 @@ impl UnionFind {
     }
 
     /// Find the representative of the set containing `x` (with path compression).
+    ///
+    /// Uses an iterative two-pass algorithm to avoid stack overflow
+    /// on long chains (the recursive version could overflow for >10k elements).
     pub fn find(&mut self, x: usize) -> usize {
-        if self.parent[x] != x {
-            self.parent[x] = self.find(self.parent[x]);
+        // Pass 1: walk to root
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
         }
-        self.parent[x]
+        // Pass 2: path compression — point all nodes directly to root
+        let mut current = x;
+        while current != root {
+            let next = self.parent[current];
+            self.parent[current] = root;
+            current = next;
+        }
+        root
     }
 
     /// Union the sets containing `x` and `y` (by rank).
@@ -87,6 +99,11 @@ pub fn select_reference(files: &[FileEntry]) -> (FileEntry, Vec<FileEntry>) {
         return (files[0].clone(), Vec::new());
     }
 
+    // Find min/max mtime for relative scoring
+    let min_mtime = files.iter().map(|f| f.modified_at).min().unwrap_or(0);
+    let max_mtime = files.iter().map(|f| f.modified_at).max().unwrap_or(0);
+    let mtime_range = (max_mtime - min_mtime).max(1); // avoid div-by-zero
+
     // Score each file: higher = more likely original
     let scored: Vec<(i64, usize)> = files
         .iter()
@@ -102,9 +119,10 @@ pub fn select_reference(files: &[FileEntry]) -> (FileEntry, Vec<FileEntry>) {
                 score -= 50;
             }
 
-            // Prefer older files (lower mtime = older = more likely original)
-            // Normalize: oldest file gets +5, others get 0
-            score -= f.modified_at / 1_000_000; // coarse ranking by mtime
+            // Prefer older files — normalize mtime to 0..100 range
+            // so it doesn't dominate path depth (-10/level) or copy (-50) heuristics
+            let relative_age = ((f.modified_at - min_mtime) * 100) / mtime_range;
+            score -= relative_age;
 
             (score, i)
         })

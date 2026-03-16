@@ -9,6 +9,19 @@ use crate::types::IndexEntry;
 /// Batch size for handle operations to avoid handle exhaustion.
 const ENRICH_BATCH_SIZE: usize = 1000;
 
+/// RAII wrapper for Win32 HANDLEs that ensures `CloseHandle` is called on drop.
+struct SafeHandle(windows::Win32::Foundation::HANDLE);
+
+impl Drop for SafeHandle {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: handle was opened by CreateFileW and is valid.
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 /// Enrich a slice of index entries with file sizes.
 ///
 /// Opens each file with shared access, queries `FileStandardInfo` for
@@ -21,7 +34,6 @@ const ENRICH_BATCH_SIZE: usize = 1000;
 #[tracing::instrument(skip(entries), fields(count = entries.len()))]
 pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_NORMAL,
         FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -61,7 +73,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
             };
 
             let handle = match handle_result {
-                Ok(h) => h,
+                Ok(h) => SafeHandle(h),
                 Err(e) => {
                     tracing::warn!(
                         path = %entry.full_path.display(),
@@ -78,7 +90,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
             // SAFETY: handle is valid (just opened above), buffer is correctly sized.
             let info_result = unsafe {
                 GetFileInformationByHandleEx(
-                    handle,
+                    handle.0,
                     FileStandardInfo,
                     &mut file_info as *mut _ as *mut _,
                     std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
@@ -96,11 +108,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
                 );
                 skipped += 1;
             }
-
-            // SAFETY: handle is valid and was opened by us.
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
+            // handle is automatically closed via SafeHandle::drop
         }
     }
 

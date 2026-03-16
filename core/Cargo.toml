@@ -17,6 +17,8 @@ roaring = { version = "0.10", features = ["serde"] }
 ulid = { version = "1", features = ["serde"] }
 sqlx = { workspace = true }
 redb = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 criterion = { workspace = true }

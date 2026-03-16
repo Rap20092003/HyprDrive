@@ -113,13 +113,34 @@ impl FileEntry {
     }
 
     /// Whether the filename contains common copy patterns.
+    ///
+    /// Detects: "Copy of X", "X - Copy", "X (N)" for N=1..99, and Windows "X~1" style.
     pub fn has_copy_pattern(&self) -> bool {
         let lower = self.name.to_lowercase();
-        lower.contains("copy of ")
-            || lower.contains(" - copy")
-            || lower.contains(" (1)")
-            || lower.contains(" (2)")
-            || lower.contains(" (3)")
+        if lower.contains("copy of ") || lower.contains(" - copy") || lower.contains(" copy.") {
+            return true;
+        }
+        // Detect " (N)" where N is 1..99
+        if let Some(start) = lower.rfind(" (") {
+            if let Some(end) = lower[start..].find(')') {
+                let inside = &lower[start + 2..start + end];
+                if inside.len() <= 2 && inside.chars().all(|c| c.is_ascii_digit()) {
+                    if let Ok(n) = inside.parse::<u32>() {
+                        if (1..=99).contains(&n) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        // Windows short name collision: "filename~1.ext"
+        if lower.contains('~') {
+            let stem = lower.rsplit('.').next_back().unwrap_or(&lower);
+            if stem.ends_with("~1") || stem.ends_with("~2") || stem.ends_with("~3") {
+                return true;
+            }
+        }
+        false
     }
 }
 
