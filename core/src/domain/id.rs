@@ -169,7 +169,10 @@ define_id!(
 );
 define_id!(DeviceId, "Identifies a device in the HyprDrive network.");
 define_id!(TagId, "Identifies a semantic tag.");
-define_id!(VirtualFolderId, "Identifies a virtual folder (saved filter query).");
+define_id!(
+    VirtualFolderId,
+    "Identifies a virtual folder (saved filter query)."
+);
 
 #[cfg(test)]
 mod tests {

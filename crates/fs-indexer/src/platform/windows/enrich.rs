@@ -23,10 +23,9 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandleEx, FileStandardInfo,
-        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        OPEN_EXISTING, FILE_STANDARD_INFO,
+        CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_NORMAL,
+        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FILE_STANDARD_INFO, OPEN_EXISTING,
     };
 
     let total = entries.len();
@@ -105,12 +104,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
         }
     }
 
-    tracing::info!(
-        total,
-        enriched,
-        skipped,
-        "size enrichment complete"
-    );
+    tracing::info!(total, enriched, skipped, "size enrichment complete");
 
     Ok(())
 }

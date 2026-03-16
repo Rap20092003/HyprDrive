@@ -73,11 +73,7 @@ impl std::fmt::Display for DupeReport {
             self.total_duplicate_bytes as f64 / (1024.0 * 1024.0)
         )?;
         writeln!(f, "Scan duration:    {:.2?}", self.scan_duration)?;
-        writeln!(
-            f,
-            "Strategies:       {}",
-            self.strategies_used.join(", ")
-        )?;
+        writeln!(f, "Strategies:       {}", self.strategies_used.join(", "))?;
         Ok(())
     }
 }
@@ -148,10 +144,7 @@ impl DuplicateScanner {
         // Filter files by size constraints
         let filtered: Vec<&FileEntry> = files
             .iter()
-            .filter(|f| {
-                f.size >= self.min_size
-                    && self.max_size.map_or(true, |max| f.size <= max)
-            })
+            .filter(|f| f.size >= self.min_size && self.max_size.map_or(true, |max| f.size <= max))
             .collect();
 
         let files_scanned = filtered.len();
@@ -180,11 +173,7 @@ impl DuplicateScanner {
                         match crate::perceptual::find_similar_images(files, *threshold) {
                             Ok(perceptual_matches) => {
                                 for m in perceptual_matches {
-                                    all_pairs.push((
-                                        m.idx_a,
-                                        m.idx_b,
-                                        MatchKind::PerceptualImage,
-                                    ));
+                                    all_pairs.push((m.idx_a, m.idx_b, MatchKind::PerceptualImage));
                                 }
                             }
                             Err(e) => {
@@ -244,10 +233,7 @@ pub fn group_by_size<'a>(
 /// 2. Partial hash within each bucket (parallel)
 /// 3. Full hash within each partial-match group (parallel)
 /// 4. Collect pairs of matching files
-fn scan_content(
-    all_files: &[FileEntry],
-    min_size: u64,
-) -> Vec<(usize, usize, MatchKind)> {
+fn scan_content(all_files: &[FileEntry], min_size: u64) -> Vec<(usize, usize, MatchKind)> {
     let size_buckets = group_by_size(all_files, min_size);
     let mut result_pairs: Vec<(usize, usize, MatchKind)> = Vec::new();
 
@@ -285,8 +271,8 @@ fn scan_content(
 
             let full_results: Vec<Option<(usize, [u8; 32])>> = group
                 .par_iter()
-                .map(|&idx| {
-                    match crate::hasher::full_hash(&all_files[idx].path) {
+                .map(
+                    |&idx| match crate::hasher::full_hash(&all_files[idx].path) {
                         Ok(hash) => Some((idx, hash)),
                         Err(e) => {
                             tracing::warn!(
@@ -296,12 +282,11 @@ fn scan_content(
                             );
                             None
                         }
-                    }
-                })
+                    },
+                )
                 .collect();
 
-            let valid_fulls: Vec<(usize, [u8; 32])> =
-                full_results.into_iter().flatten().collect();
+            let valid_fulls: Vec<(usize, [u8; 32])> = full_results.into_iter().flatten().collect();
 
             // Group by full hash
             let mut full_groups: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
@@ -317,11 +302,7 @@ fn scan_content(
                 // Create pairs between all members
                 for i in 0..indices.len() {
                     for j in (i + 1)..indices.len() {
-                        result_pairs.push((
-                            indices[i],
-                            indices[j],
-                            MatchKind::Content,
-                        ));
+                        result_pairs.push((indices[i], indices[j], MatchKind::Content));
                     }
                 }
             }

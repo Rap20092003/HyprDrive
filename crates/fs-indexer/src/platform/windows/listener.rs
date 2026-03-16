@@ -21,9 +21,16 @@ use tokio_util::sync::CancellationToken;
 /// Implement this to plug in your storage backend (e.g. redb, file, etc.).
 pub trait CursorStore: Send + Sync + 'static {
     /// Save a cursor for a volume key (e.g. "C").
-    fn save(&self, volume_key: &str, cursor: &UsnCursor) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn save(
+        &self,
+        volume_key: &str,
+        cursor: &UsnCursor,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     /// Load a cursor for a volume key. Returns None if not found.
-    fn load(&self, volume_key: &str) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>>;
+    fn load(
+        &self,
+        volume_key: &str,
+    ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// A no-op cursor store that doesn't persist anything.
@@ -32,10 +39,17 @@ pub trait CursorStore: Send + Sync + 'static {
 pub struct NoCursorStore;
 
 impl CursorStore for NoCursorStore {
-    fn save(&self, _volume_key: &str, _cursor: &UsnCursor) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn save(
+        &self,
+        _volume_key: &str,
+        _cursor: &UsnCursor,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
-    fn load(&self, _volume_key: &str) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
+    fn load(
+        &self,
+        _volume_key: &str,
+    ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(None)
     }
 }
@@ -117,10 +131,7 @@ impl UsnListener {
     ///
     /// Returns a `JoinHandle` per volume for the caller to await or drop.
     #[tracing::instrument(skip(self, store), fields(volumes = ?self.config.volumes))]
-    pub fn start<S: CursorStore>(
-        &self,
-        store: Arc<S>,
-    ) -> FsIndexerResult<Vec<JoinHandle<()>>> {
+    pub fn start<S: CursorStore>(&self, store: Arc<S>) -> FsIndexerResult<Vec<JoinHandle<()>>> {
         let mut handles = Vec::with_capacity(self.config.volumes.len());
 
         for volume in &self.config.volumes {
@@ -137,10 +148,7 @@ impl UsnListener {
             handles.push(handle);
         }
 
-        tracing::info!(
-            volume_count = handles.len(),
-            "USN listener started"
-        );
+        tracing::info!(volume_count = handles.len(), "USN listener started");
 
         Ok(handles)
     }
@@ -385,7 +393,9 @@ mod tests {
 
         // Create a temp file to trigger a change
         let test_file = std::env::temp_dir().join("hyprdrive_listener_test.tmp");
-        tokio::fs::write(&test_file, b"listener test").await.unwrap();
+        tokio::fs::write(&test_file, b"listener test")
+            .await
+            .unwrap();
 
         // Wait for an event (with timeout)
         let result = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
@@ -399,6 +409,9 @@ mod tests {
         }
 
         // We should have received at least one event
-        assert!(result.is_ok(), "Expected to receive a change event within 2s");
+        assert!(
+            result.is_ok(),
+            "Expected to receive a change event within 2s"
+        );
     }
 }

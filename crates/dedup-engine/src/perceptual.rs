@@ -11,9 +11,7 @@ use crate::error::DeduplicateError;
 use crate::FileEntry;
 
 /// Image file extensions recognized by the perceptual matcher.
-const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff", "tif",
-];
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff", "tif"];
 
 /// Check if a file extension indicates an image.
 pub fn is_image(ext: &str) -> bool {
@@ -47,12 +45,7 @@ pub fn find_similar_images(
     let images: Vec<(usize, &FileEntry)> = files
         .iter()
         .enumerate()
-        .filter(|(_, f)| {
-            f.extension
-                .as_deref()
-                .map(is_image)
-                .unwrap_or(false)
-        })
+        .filter(|(_, f)| f.extension.as_deref().map(is_image).unwrap_or(false))
         .collect();
 
     if images.len() < 2 {
@@ -136,16 +129,14 @@ mod tests {
     #[test]
     fn find_similar_filters_non_images() {
         use std::path::PathBuf;
-        let files = vec![
-            FileEntry {
-                path: PathBuf::from("/test/file.txt"),
-                size: 100,
-                name: "file.txt".to_string(),
-                extension: Some("txt".to_string()),
-                modified_at: 0,
-                inode: None,
-            },
-        ];
+        let files = vec![FileEntry {
+            path: PathBuf::from("/test/file.txt"),
+            size: 100,
+            name: "file.txt".to_string(),
+            extension: Some("txt".to_string()),
+            modified_at: 0,
+            inode: None,
+        }];
         let result = find_similar_images(&files, 10).unwrap();
         assert!(result.is_empty());
     }

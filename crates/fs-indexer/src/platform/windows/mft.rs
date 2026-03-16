@@ -112,9 +112,7 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
 /// Build a parent-FRN lookup map from topology entries.
 ///
 /// Returns a map from FRN → (parent_fid, name) for path reconstruction.
-pub fn build_parent_map(
-    entries: &[TopoEntry],
-) -> std::collections::HashMap<u64, (u64, OsString)> {
+pub fn build_parent_map(entries: &[TopoEntry]) -> std::collections::HashMap<u64, (u64, OsString)> {
     entries
         .iter()
         .map(|e| (e.fid, (e.parent_fid, e.name.clone())))
@@ -231,11 +229,7 @@ mod tests {
         let entries = mft_enumerate_topology(Path::new("C:\\"));
         match entries {
             Ok(e) => {
-                assert!(
-                    e.len() > 10_000,
-                    "expected > 10k entries, got {}",
-                    e.len()
-                );
+                assert!(e.len() > 10_000, "expected > 10k entries, got {}", e.len());
                 for entry in &e {
                     assert!(
                         entry.fid >= MIN_USER_FRN,

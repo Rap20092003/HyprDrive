@@ -55,7 +55,10 @@ pub fn detect_filesystem(volume: &Path) -> FsIndexerResult<FilesystemKind> {
     }
 
     // Convert the filesystem name buffer to a string
-    let fs_name_len = fs_name_buf.iter().position(|&c| c == 0).unwrap_or(fs_name_buf.len());
+    let fs_name_len = fs_name_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(fs_name_buf.len());
     let fs_name = String::from_utf16_lossy(&fs_name_buf[..fs_name_len]);
 
     tracing::debug!(filesystem = %fs_name, "detected filesystem");

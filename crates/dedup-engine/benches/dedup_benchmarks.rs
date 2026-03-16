@@ -44,9 +44,7 @@ fn bench_size_bucket_100k(c: &mut Criterion) {
         })
         .collect();
 
-    c.bench_function("size_bucket_100k", |b| {
-        b.iter(|| group_by_size(&files, 1))
-    });
+    c.bench_function("size_bucket_100k", |b| b.iter(|| group_by_size(&files, 1)));
 }
 
 fn bench_fuzzy_match_1k(c: &mut Criterion) {

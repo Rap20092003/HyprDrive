@@ -48,14 +48,13 @@ fn drive_letter(volume: &Path) -> FsIndexerResult<char> {
 pub fn read_cursor(volume: &Path) -> FsIndexerResult<UsnCursor> {
     let letter = drive_letter(volume)?;
 
-    let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
-    })?;
+    let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter)
+        .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
 
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
-    let journal_data = journal.query(false).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
-    })?;
+    let journal_data = journal
+        .query(false)
+        .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
 
     Ok(UsnCursor {
         journal_id: journal_data.journal_id,
@@ -79,17 +78,16 @@ pub fn poll_changes(
 ) -> FsIndexerResult<(Vec<FsChange>, UsnCursor)> {
     let letter = drive_letter(volume)?;
 
-    let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
-    })?;
+    let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter)
+        .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
 
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
 
     // Create enum options starting from the cursor's next_usn
     let options = usn_journal_rs::journal::EnumOptions::default();
-    let journal_iter = journal.iter_with_options(options).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
-    })?;
+    let journal_iter = journal
+        .iter_with_options(options)
+        .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
 
     let mut changes = Vec::new();
     let mut max_usn = cursor.next_usn;
@@ -124,7 +122,7 @@ pub fn poll_changes(
                 name: name.clone(),
                 name_lossy: name.to_string_lossy().to_string(),
                 full_path: std::path::PathBuf::new(), // needs path reconstruction
-                size: 0,                               // needs enrichment
+                size: 0,                              // needs enrichment
                 allocated_size: 0,
                 is_dir: false,
                 modified_at: Utc::now(),
