@@ -137,6 +137,36 @@ mod tests {
         assert_eq!(ENRICH_BATCH_SIZE, 1000);
     }
 
+    #[test]
+    fn enrich_skips_directories() {
+        let mut entries = vec![IndexEntry {
+            fid: 1,
+            parent_fid: 0,
+            name: OsString::from("Windows"),
+            name_lossy: "Windows".to_string(),
+            full_path: PathBuf::from("C:\\Windows"),
+            size: 0,
+            allocated_size: 0,
+            is_dir: true,
+            modified_at: Utc::now(),
+            attributes: 0x10,
+        }];
+        let result = enrich_sizes(&mut entries);
+        assert!(result.is_ok());
+        // Directories should keep size=0 (skipped, not attempted)
+        assert_eq!(entries[0].size, 0);
+    }
+
+    #[test]
+    fn enrich_nonexistent_file_does_not_panic() {
+        let mut entries = vec![make_test_entry(
+            "C:\\nonexistent_path_hyprdrive_test_12345\\file.txt",
+        )];
+        let result = enrich_sizes(&mut entries);
+        assert!(result.is_ok(), "should not fail on non-existent file");
+        assert_eq!(entries[0].size, 0, "non-existent file should have size=0");
+    }
+
     /// Requires a real file on disk. Run manually:
     /// `cargo test -p hyprdrive-fs-indexer -- --ignored enrich_known_file`
     #[test]

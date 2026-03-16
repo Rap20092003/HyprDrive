@@ -377,6 +377,83 @@ mod tests {
         assert_eq!(store.load("C").unwrap(), None);
     }
 
+    /// In-memory cursor store for testing. Stores cursors in a HashMap.
+    struct InMemoryCursorStore {
+        data: std::sync::Mutex<std::collections::HashMap<String, UsnCursor>>,
+    }
+
+    impl InMemoryCursorStore {
+        fn new() -> Self {
+            Self {
+                data: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+    }
+
+    impl CursorStore for InMemoryCursorStore {
+        fn save(
+            &self,
+            volume_key: &str,
+            cursor: &UsnCursor,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.data
+                .lock()
+                .unwrap()
+                .insert(volume_key.to_string(), cursor.clone());
+            Ok(())
+        }
+
+        fn load(
+            &self,
+            volume_key: &str,
+        ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.data.lock().unwrap().get(volume_key).cloned())
+        }
+    }
+
+    #[test]
+    fn in_memory_cursor_store_roundtrip() {
+        let store = InMemoryCursorStore::new();
+        let cursor = UsnCursor {
+            journal_id: 42,
+            next_usn: 100,
+        };
+        store.save("C", &cursor).unwrap();
+        let loaded = store.load("C").unwrap();
+        assert_eq!(loaded, Some(cursor));
+    }
+
+    #[test]
+    fn in_memory_cursor_store_miss() {
+        let store = InMemoryCursorStore::new();
+        assert_eq!(store.load("Z").unwrap(), None);
+    }
+
+    #[test]
+    fn in_memory_cursor_store_overwrite() {
+        let store = InMemoryCursorStore::new();
+        store
+            .save(
+                "C",
+                &UsnCursor {
+                    journal_id: 1,
+                    next_usn: 10,
+                },
+            )
+            .unwrap();
+        store
+            .save(
+                "C",
+                &UsnCursor {
+                    journal_id: 1,
+                    next_usn: 50,
+                },
+            )
+            .unwrap();
+        let loaded = store.load("C").unwrap().unwrap();
+        assert_eq!(loaded.next_usn, 50);
+    }
+
     /// Integration test: requires admin privileges.
     /// Run: `cargo test -p hyprdrive-fs-indexer -- --ignored listener_start_and_shutdown`
     #[tokio::test]
