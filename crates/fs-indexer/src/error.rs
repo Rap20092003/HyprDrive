@@ -52,6 +52,31 @@ pub enum FsIndexerError {
         parent_fid: u64,
     },
 
+    /// fanotify initialization or watch failed.
+    #[error("fanotify error: {source}")]
+    FanotifyError {
+        /// Underlying I/O error from fanotify.
+        source: std::io::Error,
+    },
+
+    /// inotify watch limit exhausted.
+    #[error("inotify watch limit reached: {current}/{max} watches")]
+    InotifyWatchLimit {
+        /// Current number of watches.
+        current: usize,
+        /// Maximum allowed by kernel.
+        max: usize,
+    },
+
+    /// Pseudo-filesystem detected — should be skipped, not indexed.
+    #[error("pseudo-filesystem at {path}: {fs_type}")]
+    PseudoFilesystem {
+        /// Mount path of the pseudo-filesystem.
+        path: String,
+        /// Detected filesystem type string.
+        fs_type: String,
+    },
+
     /// Generic I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

@@ -72,6 +72,13 @@ chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
 redb = "2"
 
+# Linux filesystem
+nix = { version = "0.29", default-features = false, features = ["fs", "mount"] }
+inotify = { version = "0.11", default-features = false }
+
+# Cross-platform directory walking
+jwalk = "0.8"
+
 # Testing utilities
 tempfile = "3"
 

@@ -80,6 +80,24 @@ pub enum FilesystemKind {
     ExFat,
     /// ReFS — Windows resilient filesystem.
     Refs,
+    /// ext4 — default Linux filesystem.
+    Ext4,
+    /// btrfs — copy-on-write Linux filesystem.
+    Btrfs,
+    /// XFS — high-performance Linux filesystem.
+    Xfs,
+    /// ZFS — advanced filesystem with snapshots.
+    Zfs,
+    /// tmpfs — in-memory temporary filesystem.
+    Tmpfs,
+    /// 9P — Plan 9 protocol (WSL2 Windows mount at /mnt/c).
+    NineP,
+    /// NFS — network filesystem.
+    Nfs,
+    /// OverlayFS — union mount filesystem (Docker).
+    OverlayFs,
+    /// FUSE — filesystem in userspace.
+    Fuse,
     /// Unknown or unsupported filesystem.
     Unknown,
 }
@@ -108,13 +126,27 @@ pub struct UsnCursor {
     pub next_usn: i64,
 }
 
+/// Linux filesystem cursor for tracking scan position.
+///
+/// Unlike NTFS's USN journal (which has a sequential cursor), Linux uses
+/// timestamp-based tracking combined with inotify/fanotify state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxCursor {
+    /// Timestamp of last completed scan (epoch milliseconds).
+    pub last_scan_epoch_ms: i64,
+    /// Whether fanotify was active during this scan (vs inotify fallback).
+    pub fanotify_active: bool,
+}
+
 /// Volume scan result combining entries with cursor state.
 #[derive(Debug)]
 pub struct ScanResult {
     /// All indexed entries from the scan.
     pub entries: Vec<IndexEntry>,
-    /// USN cursor for subsequent delta queries (None for non-NTFS).
+    /// USN cursor for subsequent delta queries (Windows/NTFS only).
     pub cursor: Option<UsnCursor>,
+    /// Linux cursor for timestamp-based tracking (Linux only).
+    pub linux_cursor: Option<LinuxCursor>,
 }
 
 #[cfg(test)]
@@ -156,6 +188,52 @@ mod tests {
             }
             _ => panic!("expected FullRescanNeeded"),
         }
+    }
+
+    #[test]
+    fn filesystem_kind_linux_variants_serde() -> Result<(), Box<dyn std::error::Error>> {
+        for kind in [
+            FilesystemKind::Ext4,
+            FilesystemKind::Btrfs,
+            FilesystemKind::Xfs,
+            FilesystemKind::Zfs,
+            FilesystemKind::Tmpfs,
+            FilesystemKind::NineP,
+            FilesystemKind::Nfs,
+            FilesystemKind::OverlayFs,
+            FilesystemKind::Fuse,
+        ] {
+            let json = serde_json::to_string(&kind)?;
+            let back: FilesystemKind = serde_json::from_str(&json)?;
+            assert_eq!(kind, back);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn linux_cursor_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = LinuxCursor {
+            last_scan_epoch_ms: 1_710_600_000_000,
+            fanotify_active: false,
+        };
+        let json = serde_json::to_string(&cursor)?;
+        let back: LinuxCursor = serde_json::from_str(&json)?;
+        assert_eq!(cursor, back);
+        Ok(())
+    }
+
+    #[test]
+    fn scan_result_with_linux_cursor() {
+        let result = ScanResult {
+            entries: Vec::new(),
+            cursor: None,
+            linux_cursor: Some(LinuxCursor {
+                last_scan_epoch_ms: 1_710_600_000_000,
+                fanotify_active: false,
+            }),
+        };
+        assert!(result.linux_cursor.is_some());
+        assert!(result.cursor.is_none());
     }
 
     #[test]

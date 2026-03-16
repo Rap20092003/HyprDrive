@@ -1,9 +1,9 @@
-//! Platform-native filesystem indexer (MFT, getattrlistbulk, io_uring).
+//! Platform-native filesystem indexer.
 //!
 //! Provides fast filesystem enumeration using platform-specific APIs:
 //! - **Windows**: NTFS MFT enumeration via `usn-journal-rs`, with `jwalk` fallback
-//! - **macOS**: `getattrlistbulk` (Phase 4)
-//! - **Linux**: `io_uring` + `getdents64` (Phase 5)
+//! - **Linux**: `jwalk` + `inotify` (Phase 4, `io_uring` opt-in future)
+//! - **macOS**: `getattrlistbulk` (Phase 5)
 //!
 //! # Architecture
 //!
@@ -28,7 +28,7 @@ pub mod types;
 
 // Re-export key types at crate root
 pub use error::{FsIndexerError, FsIndexerResult};
-pub use types::{FilesystemKind, FsChange, IndexEntry, ScanResult, TopoEntry, UsnCursor};
+pub use types::{FilesystemKind, FsChange, IndexEntry, LinuxCursor, ScanResult, TopoEntry, UsnCursor};
 
 // Re-export platform-specific scanner functions
 #[cfg(target_os = "windows")]
@@ -42,3 +42,13 @@ pub use platform::windows::usn::{poll_changes, read_cursor};
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::listener::{CursorStore, ListenerConfig, NoCursorStore, UsnListener};
+
+// Linux platform re-exports
+#[cfg(target_os = "linux")]
+pub use platform::linux::scanner::{auto_scan, fallback_scan, full_scan};
+
+#[cfg(target_os = "linux")]
+pub use platform::linux::detect::{detect_filesystem, MountInfo};
+
+#[cfg(target_os = "linux")]
+pub use platform::linux::listener::{LinuxListener, LinuxListenerConfig};

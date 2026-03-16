@@ -77,7 +77,7 @@ pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         }
     };
 
-    Ok(ScanResult { entries, cursor })
+    Ok(ScanResult { entries, cursor, linux_cursor: None })
 }
 
 /// Fallback scan using `jwalk` for non-NTFS volumes or non-admin runs.
@@ -175,6 +175,7 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     Ok(ScanResult {
         entries,
         cursor: None, // No USN journal on non-NTFS
+        linux_cursor: None,
     })
 }
 
