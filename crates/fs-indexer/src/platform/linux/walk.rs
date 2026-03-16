@@ -158,7 +158,12 @@ mod tests {
         }
         let entries = walk_directory(dir.path(), false).expect("walk should succeed");
         // 1 root dir + 5 files = 6
-        assert_eq!(entries.len(), 6, "expected 6 entries, got {}", entries.len());
+        assert_eq!(
+            entries.len(),
+            6,
+            "expected 6 entries, got {}",
+            entries.len()
+        );
     }
 
     #[test]

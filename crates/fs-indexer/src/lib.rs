@@ -28,7 +28,9 @@ pub mod types;
 
 // Re-export key types at crate root
 pub use error::{FsIndexerError, FsIndexerResult};
-pub use types::{FilesystemKind, FsChange, IndexEntry, LinuxCursor, ScanResult, TopoEntry, UsnCursor};
+pub use types::{
+    FilesystemKind, FsChange, IndexEntry, LinuxCursor, ScanResult, TopoEntry, UsnCursor,
+};
 
 // Re-export platform-specific scanner functions
 #[cfg(target_os = "windows")]

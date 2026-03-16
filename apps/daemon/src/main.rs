@@ -34,8 +34,8 @@ async fn main() -> Result<()> {
     info!("database ready");
 
     let cache_path = data_dir.join("cache.redb");
-    let _cache = hyprdrive_core::db::cache::open_cache(&cache_path)
-        .context("failed to open redb cache")?;
+    let _cache =
+        hyprdrive_core::db::cache::open_cache(&cache_path).context("failed to open redb cache")?;
     info!(path = %cache_path.display(), "redb hot-cache ready");
 
     // ── Phase 3: Volume scanning (stub) ──

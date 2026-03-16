@@ -126,7 +126,8 @@ fn bench_redb_inode_lookup(c: &mut Criterion) {
     c.bench_function("redb_inode_batch_lookup_100", |b| {
         b.iter(|| {
             for i in 0u64..100 {
-                let key = cache::inode::cache_key("vol1", i * 100, 1_700_000_000i64 + i as i64 * 100);
+                let key =
+                    cache::inode::cache_key("vol1", i * 100, 1_700_000_000i64 + i as i64 * 100);
                 let result = cache::inode::get(&db, &key).expect("get");
                 black_box(result);
             }

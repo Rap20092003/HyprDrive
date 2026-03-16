@@ -77,7 +77,11 @@ pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         }
     };
 
-    Ok(ScanResult { entries, cursor, linux_cursor: None })
+    Ok(ScanResult {
+        entries,
+        cursor,
+        linux_cursor: None,
+    })
 }
 
 /// Fallback scan using `jwalk` for non-NTFS volumes or non-admin runs.
@@ -123,7 +127,11 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         let full_path = dir_entry.path();
         let size = metadata.len();
         // FAT32 doesn't expose allocation size — estimate from 4KB clusters
-        let allocated_size = if size == 0 { 0 } else { size.div_ceil(4096) * 4096 };
+        let allocated_size = if size == 0 {
+            0
+        } else {
+            size.div_ceil(4096) * 4096
+        };
         let modified_at = metadata
             .modified()
             .ok()
@@ -192,19 +200,17 @@ pub fn auto_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     let fs_kind = detect::detect_filesystem(volume)?;
 
     match fs_kind {
-        FilesystemKind::Ntfs => {
-            match full_scan(volume) {
-                Ok(result) => Ok(result),
-                Err(FsIndexerError::MftAccess { volume: v, .. }) => {
-                    tracing::warn!(
-                        volume = %v,
-                        "MFT access denied, falling back to jwalk"
-                    );
-                    fallback_scan(volume)
-                }
-                Err(e) => Err(e),
+        FilesystemKind::Ntfs => match full_scan(volume) {
+            Ok(result) => Ok(result),
+            Err(FsIndexerError::MftAccess { volume: v, .. }) => {
+                tracing::warn!(
+                    volume = %v,
+                    "MFT access denied, falling back to jwalk"
+                );
+                fallback_scan(volume)
             }
-        }
+            Err(e) => Err(e),
+        },
         FilesystemKind::Fat32 | FilesystemKind::ExFat => {
             tracing::info!(fs = ?fs_kind, "non-NTFS volume, using jwalk fallback");
             fallback_scan(volume)
@@ -266,8 +272,11 @@ mod tests {
         let dir = tempfile::TempDir::new().expect("create tempdir failed");
         // Create some test files
         for i in 0..10 {
-            std::fs::write(dir.path().join(format!("file_{i}.txt")), format!("content {i}"))
-                .expect("write failed");
+            std::fs::write(
+                dir.path().join(format!("file_{i}.txt")),
+                format!("content {i}"),
+            )
+            .expect("write failed");
         }
 
         let result = fallback_scan(dir.path());

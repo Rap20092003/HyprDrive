@@ -80,7 +80,11 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
         }
     }
 
-    tracing::info!(enriched = enriched, skipped = skipped, "enrichment complete");
+    tracing::info!(
+        enriched = enriched,
+        skipped = skipped,
+        "enrichment complete"
+    );
 
     Ok(EnrichStats { enriched, skipped })
 }

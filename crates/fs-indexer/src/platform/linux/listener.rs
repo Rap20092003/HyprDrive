@@ -150,8 +150,7 @@ fn setup_watches(
     root: &Path,
     recursive: bool,
 ) -> FsIndexerResult<(Inotify, HashMap<WatchDescriptor, PathBuf>)> {
-    let mut inotify =
-        Inotify::init().map_err(|e| FsIndexerError::FanotifyError { source: e })?;
+    let mut inotify = Inotify::init().map_err(|e| FsIndexerError::FanotifyError { source: e })?;
     let mut watch_map = HashMap::new();
     let mask = watch_mask();
 
@@ -511,8 +510,7 @@ mod tests {
 
             listener.shutdown();
 
-            let result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
             assert!(result.is_ok(), "listener should shut down within 5s");
         });
     }

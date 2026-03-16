@@ -78,7 +78,10 @@ impl UnionFind {
 /// - Older modification time
 /// - No "copy" pattern in filename
 pub fn select_reference(files: &[FileEntry]) -> (FileEntry, Vec<FileEntry>) {
-    assert!(!files.is_empty(), "cannot select reference from empty group");
+    assert!(
+        !files.is_empty(),
+        "cannot select reference from empty group"
+    );
 
     if files.len() == 1 {
         return (files[0].clone(), Vec::new());
@@ -129,10 +132,7 @@ pub fn select_reference(files: &[FileEntry]) -> (FileEntry, Vec<FileEntry>) {
 /// Uses union-find to merge: if A matches B and B matches C,
 /// then {A, B, C} form one group. Selects a reference for each group.
 #[tracing::instrument(skip_all, fields(file_count = files.len(), pair_count = pairs.len()))]
-pub fn group_matches(
-    files: &[FileEntry],
-    pairs: Vec<(usize, usize, MatchKind)>,
-) -> Vec<DupeGroup> {
+pub fn group_matches(files: &[FileEntry], pairs: Vec<(usize, usize, MatchKind)>) -> Vec<DupeGroup> {
     if pairs.is_empty() {
         return Vec::new();
     }
@@ -273,10 +273,7 @@ mod tests {
             make_entry("/c.txt", 100, "c.txt", 0),
         ];
         // a=b, b=c → {a,b,c}
-        let pairs = vec![
-            (0, 1, MatchKind::Content),
-            (1, 2, MatchKind::Content),
-        ];
+        let pairs = vec![(0, 1, MatchKind::Content), (1, 2, MatchKind::Content)];
         let groups = group_matches(&files, pairs);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].duplicates.len(), 2);
@@ -290,10 +287,7 @@ mod tests {
             make_entry("/c.txt", 200, "c.txt", 0),
             make_entry("/d.txt", 200, "d.txt", 0),
         ];
-        let pairs = vec![
-            (0, 1, MatchKind::Content),
-            (2, 3, MatchKind::Content),
-        ];
+        let pairs = vec![(0, 1, MatchKind::Content), (2, 3, MatchKind::Content)];
         let groups = group_matches(&files, pairs);
         assert_eq!(groups.len(), 2);
     }
@@ -312,10 +306,7 @@ mod tests {
             make_entry("/Copy of original.txt", 1000, "Copy of original.txt", 0),
             make_entry("/original (1).txt", 1000, "original (1).txt", 0),
         ];
-        let pairs = vec![
-            (0, 1, MatchKind::Content),
-            (0, 2, MatchKind::Content),
-        ];
+        let pairs = vec![(0, 1, MatchKind::Content), (0, 2, MatchKind::Content)];
         let groups = group_matches(&files, pairs);
         assert_eq!(groups.len(), 1);
         // Reference = original.txt, duplicates = 2 × 1000 = 2000 wasted

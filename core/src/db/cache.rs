@@ -223,13 +223,9 @@ pub mod cursor {
         match txn.open_table(USN_CURSORS) {
             Ok(table) => match table.get(volume_key)? {
                 Some(v) => {
-                    let record: UsnCursorRecord =
-                        serde_json::from_str(v.value()).map_err(|e| {
-                            redb::Error::Io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            ))
-                        })?;
+                    let record: UsnCursorRecord = serde_json::from_str(v.value()).map_err(|e| {
+                        redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                    })?;
                     Ok(Some(record))
                 }
                 None => Ok(None),

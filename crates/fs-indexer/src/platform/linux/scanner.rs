@@ -216,16 +216,16 @@ mod tests {
     fn full_scan_nested_dirs() {
         let dir = tempfile::TempDir::new().expect("create tempdir");
         std::fs::create_dir_all(dir.path().join("a").join("b").join("c")).expect("mkdir -p");
-        std::fs::write(dir.path().join("a").join("b").join("c").join("deep.txt"), "nested")
-            .expect("write");
+        std::fs::write(
+            dir.path().join("a").join("b").join("c").join("deep.txt"),
+            "nested",
+        )
+        .expect("write");
 
         let result = full_scan(dir.path()).expect("scan should succeed");
 
         // Find the deep file
-        let deep = result
-            .entries
-            .iter()
-            .find(|e| e.name_lossy == "deep.txt");
+        let deep = result.entries.iter().find(|e| e.name_lossy == "deep.txt");
         assert!(deep.is_some(), "should find deep.txt");
         assert_eq!(deep.expect("checked above").size, 6); // "nested" = 6 bytes
 
@@ -279,7 +279,10 @@ mod tests {
     #[ignore] // Requires Linux — run in WSL2
     fn auto_scan_proc_fails() {
         let result = auto_scan(Path::new("/proc"));
-        assert!(result.is_err(), "/proc should return PseudoFilesystem error");
+        assert!(
+            result.is_err(),
+            "/proc should return PseudoFilesystem error"
+        );
         let err = result.expect_err("checked above");
         let err_str = format!("{err}");
         assert!(

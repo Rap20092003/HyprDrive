@@ -127,12 +127,11 @@ pub fn is_pseudo_filesystem(path: &Path) -> bool {
 /// pseudo-filesystem (proc, sysfs, etc.).
 #[tracing::instrument(fields(path = %path.display()))]
 pub fn detect_filesystem(path: &Path) -> FsIndexerResult<FilesystemKind> {
-    let content = std::fs::read_to_string("/proc/mounts").map_err(|e| {
-        FsIndexerError::DetectionFailed {
+    let content =
+        std::fs::read_to_string("/proc/mounts").map_err(|e| FsIndexerError::DetectionFailed {
             volume: path.display().to_string(),
             source: e,
-        }
-    })?;
+        })?;
 
     let mounts = parse_mounts(&content);
 
@@ -174,12 +173,11 @@ pub fn detect_filesystem(path: &Path) -> FsIndexerResult<FilesystemKind> {
 /// Returns the [`MountInfo`] for the filesystem containing the given path.
 #[tracing::instrument(fields(path = %path.display()))]
 pub fn parse_mount_info(path: &Path) -> FsIndexerResult<MountInfo> {
-    let content = std::fs::read_to_string("/proc/mounts").map_err(|e| {
-        FsIndexerError::DetectionFailed {
+    let content =
+        std::fs::read_to_string("/proc/mounts").map_err(|e| FsIndexerError::DetectionFailed {
             volume: path.display().to_string(),
             source: e,
-        }
-    })?;
+        })?;
 
     let mounts = parse_mounts(&content);
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

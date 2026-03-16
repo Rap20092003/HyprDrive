@@ -1,9 +1,6 @@
 //! End-to-end integration tests for the dedup engine.
 
-use hyprdrive_dedup_engine::{
-    DuplicateScanner, FileEntry, ScanStrategy,
-    grouping::MatchKind,
-};
+use hyprdrive_dedup_engine::{grouping::MatchKind, DuplicateScanner, FileEntry, ScanStrategy};
 use std::io::Write;
 use tempfile::TempDir;
 
@@ -178,8 +175,8 @@ fn mixed_strategies_content_and_fuzzy() {
 
     let files = collect_entries(dir.path());
 
-    let scanner = DuplicateScanner::new()
-        .with_strategy(ScanStrategy::FuzzyFilename { threshold: 0.85 });
+    let scanner =
+        DuplicateScanner::new().with_strategy(ScanStrategy::FuzzyFilename { threshold: 0.85 });
     let report = scanner.scan(&files).expect("scan");
 
     // Should have at least 1 content group and 1 fuzzy group
