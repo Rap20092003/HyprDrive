@@ -171,10 +171,35 @@ mod tests {
     }
 
     #[test]
+    fn usn_reason_data_flags_correct() {
+        assert_eq!(USN_REASON_DATA_OVERWRITE, 0x00000001);
+        assert_eq!(USN_REASON_DATA_EXTEND, 0x00000002);
+        assert_eq!(USN_REASON_DATA_TRUNCATION, 0x00000004);
+    }
+
+    #[test]
     fn drive_letter_extraction() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(drive_letter(Path::new("C:\\"))?, 'C');
         assert!(drive_letter(Path::new("/mnt/data")).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn drive_letter_various_letters() {
+        assert_eq!(drive_letter(Path::new("D:\\")).unwrap(), 'D');
+        assert_eq!(drive_letter(Path::new("E:\\Users")).unwrap(), 'E');
+        assert!(drive_letter(Path::new("")).is_err());
+        assert!(drive_letter(Path::new("1:\\")).is_err());
+    }
+
+    #[test]
+    fn usn_cursor_fields() {
+        let cursor = UsnCursor {
+            journal_id: 42,
+            next_usn: 12345,
+        };
+        assert_eq!(cursor.journal_id, 42);
+        assert_eq!(cursor.next_usn, 12345);
     }
 
     /// Requires admin. Run: `cargo test -p hyprdrive-fs-indexer -- --ignored read_cursor`

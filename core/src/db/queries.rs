@@ -14,6 +14,7 @@ use sqlx::SqlitePool;
 ///
 /// Uses `idx_loc_sort(parent_id, name)` for O(log n) seeks.
 /// Returns `FileRow` — a COMPUTED struct from JOIN objects + locations.
+#[tracing::instrument(skip(pool), fields(parent_id, cursor, limit))]
 pub async fn list_files_fast(
     pool: &SqlitePool,
     parent_id: Option<&str>,
@@ -91,6 +92,7 @@ pub async fn list_files_fast(
 }
 
 /// Full-text search on file names using FTS5.
+#[tracing::instrument(skip(pool), fields(query, limit))]
 pub async fn search_files(
     pool: &SqlitePool,
     query: &str,
