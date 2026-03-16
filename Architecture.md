@@ -309,7 +309,8 @@ hyprdrive-daemon (THE system)
 │
 ├── Database        — SQLite database with all file metadata
 ├── Indexer         — Scans your drives for files
-├── File Watcher    — Detects changes in real-time
+├── File Watcher    — Detects changes in real-time (USN listener)
+├── Dedup Engine    — Finds duplicate files (content + fuzzy + perceptual)
 ├── Hasher          — Computes content hashes (BLAKE3)
 ├── Crypto Engine   — Encrypts/decrypts data (ChaCha20)
 ├── P2P Node        — Connects to other devices (Iroh + QUIC)
@@ -432,6 +433,7 @@ HyprDrive/
 │   ├── media-metadata/            ← EXIF/audio/video metadata
 │   ├── sdk/                       ← Extension SDK for plugin authors
 │   ├── sdk-macros/                ← Rust macros for extensions
+│   ├── dedup-engine/              ← Duplicate detection (BLAKE3, Jaro-Winkler, blockhash)
 │   ├── task-system/               ← Background job execution
 │   ├── actors/                    ← Actor concurrency framework
 │   └── utils/                     ← Shared utilities
@@ -802,6 +804,11 @@ For these, HyprDrive uses redb — a zero-copy embedded key-value store:
 
   DIR_SIZE_CACHE:   location_id → DirSizeRecord
                     "How big is this directory?"
+
+  USN_CURSORS:      volume_key → UsnCursorRecord
+                    "Where did we last read in the USN journal?"
+                    Enables the USN listener to resume after daemon restart
+                    without missing any filesystem changes.
 ```
 
 ---
@@ -886,9 +893,100 @@ HyprDrive automatically detects:
   LARGEST DIRECTORS:  Top 100 directories by cumulative size
   STALE FILES:        Files not accessed in 2+ years
   BUILD ARTIFACTS:    node_modules/, target/, __pycache__/, .gradle/
-  DUPLICATES:         Files with same ObjectId in multiple locations
+  DUPLICATES:         Multi-strategy duplicate detection (see Dedup Engine below)
   WASTED SPACE:       allocated_size − logical_size (filesystem overhead)
   TYPE BREAKDOWN:     Pie chart of space by file type (Video, Photo, etc.)
+```
+
+### Dedup Engine (Duplicate Detection)
+
+```
+HyprDrive includes a dedicated dedup-engine crate (inspired by dupeguru)
+that goes far beyond simple hash matching. It uses THREE complementary
+strategies to find duplicates:
+
+STRATEGY 1: Content Hashing (BLAKE3 Progressive)
+  The gold standard — finds exact byte-for-byte duplicates.
+
+  Pipeline (eliminates non-duplicates cheaply at each stage):
+
+    INPUT_FILES
+         │
+         ▼
+    ┌─────────────────┐
+    │ SIZE BUCKETING   │  Group by file size. Different size = different content.
+    │ (free — no I/O)  │  Skip files with unique sizes immediately.
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │ PARTIAL HASH     │  Hash first 4KB of each file (BLAKE3).
+    │ (cheap — 4KB)    │  Most non-duplicates eliminated here.
+    └────────┬────────┘
+             ▼
+    ┌─────────────────┐
+    │ FULL HASH        │  Hash entire file in 64KB streaming chunks.
+    │ (expensive)      │  Files > 512MB use memory-mapped I/O.
+    └────────┬────────┘
+             ▼
+    CONFIRMED DUPLICATES (same full BLAKE3 hash)
+
+  All hashing stages use rayon for CPU-parallel computation.
+
+STRATEGY 2: Fuzzy Filename Matching (Jaro-Winkler)
+  Finds renamed copies like "report (1).pdf" or "Copy of report.pdf".
+
+  Step 1 — Normalize names:
+    "Copy of Budget.xlsx"    → "budget"
+    "Report (1).pdf"         → "report"
+    "photo - Copy.jpg"       → "photo"
+
+  Step 2 — Group by extension (only compare .pdf with .pdf)
+  Step 3 — Pairwise Jaro-Winkler similarity (threshold: 0.85)
+
+  Note: Fuzzy matches suggest POTENTIAL duplicates. The user decides.
+
+STRATEGY 3: Perceptual Image Matching (blockhash)
+  Finds visually similar images even when resized, recompressed, or
+  slightly modified — like finding that a 2MB JPEG and a 5MB PNG
+  are actually the same photo.
+
+  Uses the image_hasher crate with 16×16 blockhash:
+    1. Load image → resize to 16×16 grid
+    2. Compute perceptual hash (captures visual structure, not pixels)
+    3. Compare hashes via Hamming distance (threshold: 10)
+
+  Behind the "perceptual" feature flag (optional dependency).
+  Supports: jpg, jpeg, png, webp, bmp, gif, tiff.
+
+GROUPING (Union-Find):
+  Matches are grouped transitively: if A=B and B=C, then {A,B,C} is one group.
+
+  For each group, a REFERENCE file is selected (the likely "original"):
+    - Shallowest path depth (fewer directories = more likely root copy)
+    - Oldest modification time
+    - No "copy" pattern in filename
+
+  DupeReport output:
+    - Duplicate groups with reference + duplicates
+    - Total wasted bytes (sum of duplicate sizes, excluding reference)
+    - Scan duration, files scanned, files skipped
+
+  Example:
+    ┌──────────────────────────────────────────────────────┐
+    │ Group 1 (Content match, BLAKE3)                      │
+    │ Reference: /photos/wedding/IMG_4521.jpg   (5.2 MB)   │
+    │ Duplicate: /backup/old/IMG_4521.jpg       (5.2 MB)   │
+    │ Duplicate: /photos/Copy of IMG_4521.jpg   (5.2 MB)   │
+    │ Wasted:    10.4 MB                                    │
+    └──────────────────────────────────────────────────────┘
+
+Crate: crates/dedup-engine/
+  src/hasher.rs      — Progressive BLAKE3 (partial + full + mmap)
+  src/scanner.rs     — DuplicateScanner orchestrator + size bucketing
+  src/fuzzy.rs       — Jaro-Winkler fuzzy matching + name normalization
+  src/perceptual.rs  — Blockhash image matching (feature-gated)
+  src/grouping.rs    — Union-find + reference selection + DupeGroup
+  src/lib.rs         — FileEntry type + DupeReport + public API
 ```
 
 ---
@@ -968,7 +1066,7 @@ HyprDrive needs to know INSTANTLY when a file changes on disk.
 How it works:
 
   1. Platform watcher detects a change:
-     - Windows: USN journal entry
+     - Windows: USN journal polling (UsnListener — continuous background monitor)
      - macOS: FSEvents notification
      - Linux: fanotify event
 
@@ -986,6 +1084,52 @@ How it works:
      re-fetches data when it receives an invalidation signal.
 
   End-to-end target: file change on disk → UI updates in < 50ms
+```
+
+### Windows USN Listener (Real-Time)
+
+```
+On Windows, HyprDrive uses a continuous background USN journal listener
+to detect filesystem changes in real-time — the same approach used by
+Everything (Voidtools) for instant file search updates.
+
+Architecture:
+
+  ┌───────────────────────────────────────┐
+  │         UsnListener                    │
+  │  ┌─────────────────────────────────┐  │
+  │  │  Volume Thread C:\              │  │
+  │  │  loop {                         │  │
+  │  │    poll_changes(cursor)         │──┼──→ mpsc::Sender<FsChange>
+  │  │    persist_cursor(redb)         │  │         │
+  │  │    sleep(100ms)                 │  │         ▼
+  │  │  }                              │  │   mpsc::Receiver<FsChange>
+  │  └─────────────────────────────────┘  │   (consumer: daemon pipeline)
+  │  ┌─────────────────────────────────┐  │
+  │  │  Volume Thread D:\              │  │
+  │  │  (same loop)                    │  │
+  │  └─────────────────────────────────┘  │
+  │  CancellationToken → graceful stop    │
+  └───────────────────────────────────────┘
+
+How it works:
+
+  1. UsnListener::start() spawns one tokio::spawn_blocking thread per volume
+  2. Each thread calls poll_changes() in a loop (default: every 100ms)
+  3. Changes arrive as FsChange events: Created, Deleted, Moved, Modified
+  4. Cursor position is persisted to redb (USN_CURSORS table) after each batch
+  5. On daemon restart, cursor is loaded from redb — no missed changes
+  6. If the USN journal wraps or is recreated, emits FsChange::FullRescanNeeded
+
+Key design:
+
+  CursorStore trait    — Abstracts cursor persistence (redb, file, or no-op)
+  NoCursorStore        — No-op implementation for testing
+  ListenerConfig       — Builder pattern: poll_interval, channel_capacity, volumes
+  CancellationToken    — Graceful shutdown from tokio-util
+  Multi-volume         — Each drive (C:\, D:\, etc.) monitored independently
+
+Event latency target: < 200ms from file change to FsChange event
 ```
 
 ---
@@ -1742,6 +1886,11 @@ the build fails.
 ├──────────────────────────────┼────────────┼──────────────────┤
 │ list_files_fast(100k)        │ < 5ms      │ Phase 2          │
 │ MFT scan 100k (Windows)     │ < 1.5s     │ Phase 3          │
+│ USN change → FsChange event │ < 200ms    │ Phase 3.5        │
+│ Partial hash (4KB)          │ < 10µs     │ Phase 3.6        │
+│ Full hash 1 MB              │ < 5ms      │ Phase 3.6        │
+│ Size bucket 100k files      │ < 50ms     │ Phase 3.6        │
+│ Fuzzy match 1k names        │ < 100ms    │ Phase 3.6        │
 │ getattrlistbulk 100k (Mac)  │ < 4s       │ Phase 4          │
 │ io_uring scan 100k (Linux)  │ < 2s       │ Phase 5          │
 │ BLAKE3 hash 1 GB            │ < 1s       │ Phase 7          │
@@ -1805,14 +1954,17 @@ CLI             Command Line Interface (text-based app in terminal)
 CLIP            AI model that understands both images and text
 CRDT            Data structure that syncs without conflicts
 Daemon          Background process with no visible window
+Dedup Engine    Multi-strategy duplicate detection (content hash, fuzzy, perceptual)
 Ed25519         Digital signature algorithm (proves identity)
 EventBus        Internal message system — components notify each other
 FTS5            SQLite's Full-Text Search engine
 getattrlistbulk macOS syscall that reads 1024 file attributes at once
 HKDF            Key derivation function (creates sub-keys from master key)
 HNSW            Hierarchical graph index for finding similar vectors fast
+image_hasher    Perceptual hashing library for detecting visually similar images
 io_uring        Linux async I/O interface for high-throughput disk reads
 Iroh            P2P networking library by n0.computer
+Jaro-Winkler    String similarity metric (0.0–1.0) for fuzzy filename matching
 MFT             Master File Table — NTFS's index of all files on a drive
 mDNS            Protocol for discovering devices on a local network
 OpenDAL         Rust library for unified cloud storage access
@@ -1829,7 +1981,9 @@ Tantivy         Rust full-text search engine (like Elasticsearch, but embedded)
 Tauri           Framework for building desktop apps with Rust + web frontend
 TDD             Test-Driven Development — write tests before code
 ULID            Unique Lexicographic ID — like UUID but sortable by time
+Union-Find      Data structure for grouping transitive matches (if A=B, B=C → {A,B,C})
 USN             Update Sequence Number — Windows change journal entry
+UsnListener     Background monitor that polls USN journal for real-time file changes
 Vector Clock    Data structure tracking "who has seen what" across devices
 WAL             Write-Ahead Logging — SQLite mode for concurrent access
 WASM            WebAssembly — portable bytecode format for sandboxed execution
@@ -1847,6 +2001,7 @@ CORE (Rust):
   Database:    SQLite + SeaORM
   Caching:     redb
   Hashing:     BLAKE3
+  Dedup:       BLAKE3 progressive + Jaro-Winkler + blockhash (image_hasher)
   Crypto:      ChaCha20-Poly1305, Ed25519, X25519, Argon2, BIP39
   P2P:         Iroh (QUIC + hole-punching + mDNS)
   Transfer:    Custom Blip engine (QUIC streams)

@@ -3,4 +3,37 @@ name = "hyprdrive-fs-indexer"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-util = { workspace = true }
+redb = { workspace = true }
+jwalk = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+usn-journal-rs = "0.4"
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+inotify = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "scan_benchmarks"
+harness = false

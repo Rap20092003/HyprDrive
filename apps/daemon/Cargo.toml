@@ -9,7 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 hyprdrive-core = { path = "../../core" }
+hyprdrive-fs-indexer = { path = "../../crates/fs-indexer" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+dirs = "6"
+sqlx = { workspace = true }
+redb = { workspace = true }
