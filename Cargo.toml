@@ -15,6 +15,7 @@ members = [
     "crates/task-system",
     "crates/actors",
     "crates/utils",
+    "crates/dedup-engine",
     "apps/daemon",
     "apps/cli",
     "helpers/hyprdrive-helper-windows",
@@ -50,6 +51,16 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Crypto
 blake3 = "1"
+
+# Dedup engine
+rayon = "1"
+strsim = "0.11"
+memmap2 = "0.9"
+image_hasher = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+# Cancellation
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Testing
 criterion = { version = "0.5", features = ["html_reports"] }
