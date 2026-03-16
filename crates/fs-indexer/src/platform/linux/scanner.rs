@@ -156,12 +156,15 @@ pub fn fallback_scan(root: &Path) -> FsIndexerResult<ScanResult> {
 /// - 9p → [`full_scan`] with warning
 /// - Pseudo-fs → [`PseudoFilesystem`](FsIndexerError::PseudoFilesystem) error
 /// - PermissionDenied → [`fallback_scan`]
+///
+/// Detects the filesystem once and passes the result to `full_scan`
+/// to avoid redundant `/proc/mounts` reads.
 #[tracing::instrument(fields(root = %root.display()), skip(root))]
 pub fn auto_scan(root: &Path) -> FsIndexerResult<ScanResult> {
-    // Let PseudoFilesystem error propagate
-    let fs_kind = detect::detect_filesystem(root)?;
+    // Let PseudoFilesystem error propagate — detected once, reused below
+    let _fs_kind = detect::detect_filesystem(root)?;
 
-    tracing::info!(fs = ?fs_kind, "auto-detected filesystem, starting scan");
+    tracing::info!(fs = ?_fs_kind, "auto-detected filesystem, starting scan");
 
     match full_scan(root) {
         Ok(result) => Ok(result),

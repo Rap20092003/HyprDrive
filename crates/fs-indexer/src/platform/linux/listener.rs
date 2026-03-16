@@ -209,8 +209,13 @@ async fn event_loop(
     recursive: bool,
 ) {
     let mut buffer = vec![0u8; 4096];
-    // Buffer for pairing MOVED_FROM/MOVED_TO by cookie
-    let mut move_buffer: HashMap<u32, (u64, PathBuf, OsString)> = HashMap::new();
+    // Buffer for pairing MOVED_FROM/MOVED_TO by cookie.
+    // Entries are timestamped so we can expire stale unpaired moves
+    // instead of draining after every batch (which breaks cross-batch pairs).
+    let mut move_buffer: HashMap<u32, (u64, PathBuf, OsString, std::time::Instant)> =
+        HashMap::new();
+    /// Max age for a buffered MOVED_FROM before we emit it as a delete.
+    const MOVE_PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
     loop {
         if cancel.is_cancelled() {
@@ -331,12 +336,17 @@ async fn event_loop(
             if event.mask.contains(EventMask::MOVED_FROM) {
                 let fid = fid_from_path(&full_path);
                 let name = event_name.clone().unwrap_or_default();
-                move_buffer.insert(event.cookie, (fid, full_path.clone(), name));
+                move_buffer.insert(
+                    event.cookie,
+                    (fid, full_path.clone(), name, std::time::Instant::now()),
+                );
             }
 
             // MOVED_TO — pair with buffered MOVED_FROM
             if event.mask.contains(EventMask::MOVED_TO) {
-                if let Some((_old_fid, _old_path, _old_name)) = move_buffer.remove(&event.cookie) {
+                if let Some((_old_fid, _old_path, _old_name, _ts)) =
+                    move_buffer.remove(&event.cookie)
+                {
                     // Paired move
                     if let Ok(meta) = std::fs::symlink_metadata(&full_path) {
                         let fid = walk::make_fid(meta.dev(), meta.ino());
@@ -385,11 +395,20 @@ async fn event_loop(
             }
         }
 
-        // Flush unpaired MOVED_FROM entries as deletes (simple approach)
-        // In production, you'd use a timeout. For now, drain after each batch.
-        for (_cookie, (fid, _path, _name)) in move_buffer.drain() {
-            if tx.send(FsChange::Deleted { fid }).await.is_err() {
-                return;
+        // Expire stale unpaired MOVED_FROM entries as deletes after timeout.
+        // This allows cross-batch MOVED_FROM/MOVED_TO pairs to be matched
+        // when the events arrive in different read_events() batches.
+        let now = std::time::Instant::now();
+        let expired: Vec<u32> = move_buffer
+            .iter()
+            .filter(|(_, (_, _, _, ts))| now.duration_since(*ts) > MOVE_PAIR_TIMEOUT)
+            .map(|(cookie, _)| *cookie)
+            .collect();
+        for cookie in expired {
+            if let Some((fid, _path, _name, _ts)) = move_buffer.remove(&cookie) {
+                if tx.send(FsChange::Deleted { fid }).await.is_err() {
+                    return;
+                }
             }
         }
     }
@@ -397,12 +416,17 @@ async fn event_loop(
 
 /// Generate a fid from a path (for deleted files where we can't stat).
 ///
-/// Uses a simple hash of the path bytes.
+/// Uses a deterministic FNV-1a hash (stable across process restarts,
+/// unlike `DefaultHasher` which uses a randomized seed).
 fn fid_from_path(path: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
+    let bytes = path.as_os_str().as_encoded_bytes();
+    // FNV-1a 64-bit: deterministic, no per-process randomization
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    hash
 }
 
 #[cfg(test)]

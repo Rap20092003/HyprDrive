@@ -141,11 +141,18 @@ impl DuplicateScanner {
     pub fn scan(&self, files: &[FileEntry]) -> DeduplicateResult<DupeReport> {
         let start = Instant::now();
 
-        // Filter files by size constraints
-        let filtered: Vec<&FileEntry> = files
+        // Filter files by size constraints, building an index map
+        // from filtered position → original position so strategies
+        // operate only on qualifying files (respecting max_size).
+        let index_map: Vec<usize> = files
             .iter()
-            .filter(|f| f.size >= self.min_size && self.max_size.map_or(true, |max| f.size <= max))
+            .enumerate()
+            .filter(|(_, f)| {
+                f.size >= self.min_size && self.max_size.map_or(true, |max| f.size <= max)
+            })
+            .map(|(i, _)| i)
             .collect();
+        let filtered: Vec<FileEntry> = index_map.iter().map(|&i| files[i].clone()).collect();
 
         let files_scanned = filtered.len();
         let files_skipped = files.len() - files_scanned;
@@ -156,24 +163,35 @@ impl DuplicateScanner {
             match strategy {
                 ScanStrategy::Content => {
                     strategies_used.push("Content (BLAKE3)".to_string());
-                    let content_pairs = scan_content(files, self.min_size);
-                    all_pairs.extend(content_pairs);
+                    let content_pairs = scan_content(&filtered, self.min_size);
+                    // Remap filtered indices back to original file positions
+                    for (a, b, kind) in content_pairs {
+                        all_pairs.push((index_map[a], index_map[b], kind));
+                    }
                 }
                 ScanStrategy::FuzzyFilename { threshold } => {
                     strategies_used.push(format!("Fuzzy Filename (threshold={threshold})"));
-                    let fuzzy_matches = crate::fuzzy::find_similar_names(files, *threshold);
+                    let fuzzy_matches = crate::fuzzy::find_similar_names(&filtered, *threshold);
                     for m in fuzzy_matches {
-                        all_pairs.push((m.idx_a, m.idx_b, MatchKind::FuzzyFilename));
+                        all_pairs.push((
+                            index_map[m.idx_a],
+                            index_map[m.idx_b],
+                            MatchKind::FuzzyFilename,
+                        ));
                     }
                 }
                 ScanStrategy::PerceptualImage { threshold } => {
                     strategies_used.push(format!("Perceptual Image (threshold={threshold})"));
                     #[cfg(feature = "perceptual")]
                     {
-                        match crate::perceptual::find_similar_images(files, *threshold) {
+                        match crate::perceptual::find_similar_images(&filtered, *threshold) {
                             Ok(perceptual_matches) => {
                                 for m in perceptual_matches {
-                                    all_pairs.push((m.idx_a, m.idx_b, MatchKind::PerceptualImage));
+                                    all_pairs.push((
+                                        index_map[m.idx_a],
+                                        index_map[m.idx_b],
+                                        MatchKind::PerceptualImage,
+                                    ));
                                 }
                             }
                             Err(e) => {

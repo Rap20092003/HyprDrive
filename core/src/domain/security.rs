@@ -34,6 +34,53 @@ impl CapabilityToken {
     pub fn has_permission(&self, perm: &str) -> bool {
         self.permissions.iter().any(|p| p == perm)
     }
+
+    /// Verify the HMAC-SHA256 signature over the token data.
+    ///
+    /// Returns `true` if the signature matches, `false` otherwise.
+    /// Must be called before trusting any token received over the network.
+    pub fn verify_signature(&self, key: &[u8]) -> bool {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+
+        // Feed deterministic token fields into the MAC
+        mac.update(self.nonce.as_bytes());
+        mac.update(self.device_id.to_string().as_bytes());
+        for perm in &self.permissions {
+            mac.update(perm.as_bytes());
+        }
+        mac.update(self.issued_at.to_rfc3339().as_bytes());
+        mac.update(self.expires_at.to_rfc3339().as_bytes());
+
+        mac.verify_slice(&self.signature).is_ok()
+    }
+
+    /// Sign this token in place with an HMAC-SHA256 key.
+    ///
+    /// Populates the `signature` field so that [`verify_signature`](Self::verify_signature)
+    /// returns `true` for the same key.
+    pub fn sign(&mut self, key: &[u8]) {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+
+        mac.update(self.nonce.as_bytes());
+        mac.update(self.device_id.to_string().as_bytes());
+        for perm in &self.permissions {
+            mac.update(perm.as_bytes());
+        }
+        mac.update(self.issued_at.to_rfc3339().as_bytes());
+        mac.update(self.expires_at.to_rfc3339().as_bytes());
+
+        self.signature = mac.finalize().into_bytes().to_vec();
+    }
 }
 
 /// A list of revoked tokens and devices.
@@ -143,6 +190,39 @@ mod tests {
 
         rl.revoke_device(device);
         assert!(rl.is_device_revoked(&device));
+    }
+
+    #[test]
+    fn signed_token_verifies_correctly() {
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let mut token = make_token(3600);
+        token.sign(key);
+        assert!(token.verify_signature(key));
+    }
+
+    #[test]
+    fn unsigned_token_fails_verification() {
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let token = make_token(3600); // signature is vec![0u8; 64]
+        assert!(!token.verify_signature(key));
+    }
+
+    #[test]
+    fn tampered_token_fails_verification() {
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let mut token = make_token(3600);
+        token.sign(key);
+        token.permissions.push("admin".into());
+        assert!(!token.verify_signature(key));
+    }
+
+    #[test]
+    fn wrong_key_fails_verification() {
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let wrong_key = b"wrong-secret-key-32-bytes-long!!";
+        let mut token = make_token(3600);
+        token.sign(key);
+        assert!(!token.verify_signature(wrong_key));
     }
 
     #[test]

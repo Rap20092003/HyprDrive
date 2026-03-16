@@ -52,7 +52,8 @@ impl TransferCheckpoint {
 
     /// Number of remaining chunks.
     pub fn remaining(&self) -> u32 {
-        self.total_chunks - self.completed_chunks.len() as u32
+        self.total_chunks
+            .saturating_sub(self.completed_chunks.len() as u32)
     }
 
     /// Whether the entire transfer is complete.

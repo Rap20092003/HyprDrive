@@ -84,7 +84,10 @@ pub fn poll_changes(
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
 
     // Create enum options starting from the cursor's next_usn
-    let options = usn_journal_rs::journal::EnumOptions::default();
+    let options = usn_journal_rs::journal::EnumOptions {
+        start_usn: cursor.next_usn,
+        ..usn_journal_rs::journal::EnumOptions::default()
+    };
     let journal_iter = journal
         .iter_with_options(options)
         .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
@@ -100,11 +103,6 @@ pub fn poll_changes(
                 continue;
             }
         };
-
-        // Skip records before our cursor position
-        if record.usn < cursor.next_usn {
-            continue;
-        }
 
         if record.usn > max_usn {
             max_usn = record.usn;

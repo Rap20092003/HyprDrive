@@ -107,13 +107,14 @@ impl FilterExpr {
                 "l.extension = ?".to_string()
             }
             Self::SizeRange { min, max } => {
-                params.push(SqlParam::Int(*min as i64));
-                params.push(SqlParam::Int(*max as i64));
+                // Clamp to i64::MAX to avoid wrapping u64::MAX → -1
+                params.push(SqlParam::Int((*min).min(i64::MAX as u64) as i64));
+                params.push(SqlParam::Int((*max).min(i64::MAX as u64) as i64));
                 "l.size BETWEEN ? AND ?".to_string()
             }
             Self::AllocatedRange { min, max } => {
-                params.push(SqlParam::Int(*min as i64));
-                params.push(SqlParam::Int(*max as i64));
+                params.push(SqlParam::Int((*min).min(i64::MAX as u64) as i64));
+                params.push(SqlParam::Int((*max).min(i64::MAX as u64) as i64));
                 "l.allocated_size BETWEEN ? AND ?".to_string()
             }
             Self::DateRange { start, end } => {
@@ -135,7 +136,7 @@ impl FilterExpr {
                 "CAST(l.allocated_size AS REAL) / MAX(l.size, 1) > ?".to_string()
             }
             Self::IsBuildArtifact => {
-                "l.materialized_path LIKE '%/node_modules/%' OR l.materialized_path LIKE '%/target/%' OR l.materialized_path LIKE '%/__pycache__/%' OR l.materialized_path LIKE '%/.git/objects/%' OR l.materialized_path LIKE '%/dist/%'".to_string()
+                "(l.materialized_path LIKE '%/node_modules/%' OR l.materialized_path LIKE '%/target/%' OR l.materialized_path LIKE '%/__pycache__/%' OR l.materialized_path LIKE '%/.git/objects/%' OR l.materialized_path LIKE '%/dist/%')".to_string()
             }
             Self::Duplicate => {
                 "o.content_hash IN (SELECT content_hash FROM objects GROUP BY content_hash HAVING COUNT(*) > 1)".to_string()

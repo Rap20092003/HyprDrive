@@ -37,9 +37,22 @@ pub async fn create_pool(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-/// Run all embedded migrations against the pool.
+/// Run all embedded migrations against the pool (idempotent).
+///
+/// Tracks applied migrations in an `_applied_migrations` table so
+/// each migration is executed exactly once, even across restarts.
 #[tracing::instrument(skip(pool))]
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Ensure the tracking table exists
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS _applied_migrations (
+            id INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     let migrations: &[&str] = &[
         include_str!("../../migrations/001_objects.sql"),
         include_str!("../../migrations/002_locations.sql"),
@@ -52,9 +65,26 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         include_str!("../../migrations/009_fts.sql"),
     ];
 
-    for sql in migrations {
-        // Use raw_sql which handles multi-statement SQL natively
+    for (i, sql) in migrations.iter().enumerate() {
+        let migration_id = (i + 1) as i64;
+
+        // Check if already applied
+        let applied: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _applied_migrations WHERE id = ?")
+                .bind(migration_id)
+                .fetch_one(pool)
+                .await?;
+
+        if applied.0 > 0 {
+            continue;
+        }
+
+        // Execute migration and record it
         sqlx::raw_sql(sql).execute(pool).await?;
+        sqlx::query("INSERT INTO _applied_migrations (id) VALUES (?)")
+            .bind(migration_id)
+            .execute(pool)
+            .await?;
     }
 
     Ok(())
