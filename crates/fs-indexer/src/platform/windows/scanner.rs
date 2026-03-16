@@ -36,10 +36,17 @@ pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     let parent_map = mft::build_parent_map(&topo_entries);
 
     // Phase 2: Convert to IndexEntry with paths, then enrich sizes
+    // Use memoized path reconstruction — much faster for large trees because
+    // sibling files in the same directory share cached parent path segments.
+    let fids: Vec<u64> = topo_entries.iter().map(|t| t.fid).collect();
+    let path_cache = mft::reconstruct_paths_cached(&fids, &parent_map, volume);
+
     let mut entries: Vec<IndexEntry> = topo_entries
         .into_iter()
         .map(|topo| {
-            let full_path = mft::reconstruct_path(topo.fid, &parent_map, volume)
+            let full_path = path_cache
+                .get(&topo.fid)
+                .cloned()
                 .unwrap_or_else(|| volume.join(topo.name.clone()));
             let name_lossy = topo.name.to_string_lossy().to_string();
 

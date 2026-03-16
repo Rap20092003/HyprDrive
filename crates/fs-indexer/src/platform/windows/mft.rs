@@ -156,6 +156,85 @@ pub fn reconstruct_path(
     Some(path)
 }
 
+/// Reconstruct full paths for multiple fids with memoization.
+///
+/// Caches intermediate path segments so files in the same directory
+/// only compute the parent path once. Returns a map from fid → `PathBuf`.
+///
+/// Much faster than calling [`reconstruct_path`] in a loop for large entry
+/// sets because sibling files share the same parent chain computation.
+pub fn reconstruct_paths_cached(
+    fids: &[u64],
+    parent_map: &std::collections::HashMap<u64, (u64, OsString)>,
+    volume_root: &Path,
+) -> std::collections::HashMap<u64, std::path::PathBuf> {
+    let mut cache: std::collections::HashMap<u64, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    let mut result = std::collections::HashMap::with_capacity(fids.len());
+
+    for &fid in fids {
+        if let Some(path) = reconstruct_path_memo(fid, parent_map, volume_root, &mut cache) {
+            result.insert(fid, path);
+        }
+    }
+    result
+}
+
+/// Iterative path reconstruction with memoization cache.
+///
+/// Walks the parent chain from `fid` upward, stopping early if a cached
+/// intermediate path is found. Caches every intermediate node on the way
+/// back down so subsequent lookups in the same subtree are O(1).
+fn reconstruct_path_memo(
+    fid: u64,
+    parent_map: &std::collections::HashMap<u64, (u64, OsString)>,
+    volume_root: &Path,
+    cache: &mut std::collections::HashMap<u64, std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    // Fast path: already cached
+    if let Some(cached) = cache.get(&fid) {
+        return Some(cached.clone());
+    }
+
+    // Collect chain of (fid, name) up to root or a cached entry
+    let mut chain: Vec<(u64, OsString)> = Vec::new();
+    let mut current = fid;
+    let mut base_path: Option<std::path::PathBuf> = None;
+
+    for _ in 0..4096 {
+        if let Some(cached) = cache.get(&current) {
+            base_path = Some(cached.clone());
+            break;
+        }
+        match parent_map.get(&current) {
+            Some((parent_fid, name)) => {
+                if *parent_fid == current {
+                    // Root entry: parent == self
+                    base_path = Some(volume_root.to_path_buf());
+                    break;
+                }
+                chain.push((current, name.clone()));
+                current = *parent_fid;
+            }
+            None => {
+                // Orphan or volume root reached
+                break;
+            }
+        }
+    }
+
+    let base = base_path?;
+
+    // Build paths from base downward, caching each intermediate node
+    let mut path = base;
+    for (chain_fid, name) in chain.iter().rev() {
+        path = path.join(name);
+        cache.insert(*chain_fid, path.clone());
+    }
+
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +298,72 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert!(map.contains_key(&100));
         assert!(map.contains_key(&200));
+    }
+
+    #[test]
+    fn reconstruct_paths_cached_basic() {
+        let mut map = std::collections::HashMap::new();
+        // root(5) -> dir(100, "docs") -> file_a(200, "a.txt"), file_b(201, "b.txt")
+        map.insert(5, (5u64, OsString::from(""))); // root
+        map.insert(100, (5u64, OsString::from("docs")));
+        map.insert(200, (100u64, OsString::from("a.txt")));
+        map.insert(201, (100u64, OsString::from("b.txt")));
+
+        let root = Path::new("C:\\");
+        let result = reconstruct_paths_cached(&[200, 201], &map, root);
+        assert_eq!(result.len(), 2);
+        assert!(result[&200].to_string_lossy().contains("docs"));
+        assert!(result[&200].to_string_lossy().contains("a.txt"));
+        assert!(result[&201].to_string_lossy().contains("b.txt"));
+    }
+
+    #[test]
+    fn reconstruct_paths_cached_shares_prefix() {
+        let mut map = std::collections::HashMap::new();
+        // root(1) -> a(2) -> b(3) -> c.txt(4), d.txt(5)
+        map.insert(1, (1u64, OsString::from("")));
+        map.insert(2, (1u64, OsString::from("a")));
+        map.insert(3, (2u64, OsString::from("b")));
+        map.insert(4, (3u64, OsString::from("c.txt")));
+        map.insert(5, (3u64, OsString::from("d.txt")));
+
+        let root = Path::new("C:\\");
+        let result = reconstruct_paths_cached(&[4, 5], &map, root);
+        let p4 = result[&4].to_string_lossy().to_string();
+        let p5 = result[&5].to_string_lossy().to_string();
+        assert!(p4.contains("a") && p4.contains("b") && p4.contains("c.txt"));
+        assert!(p5.contains("a") && p5.contains("b") && p5.contains("d.txt"));
+    }
+
+    #[test]
+    fn reconstruct_path_orphan_returns_none() {
+        // Entry with parent not in map → returns a partial path (not None,
+        // because the current impl breaks on missing parent with a partial result).
+        // But reconstruct_path_memo returns None for true orphans.
+        let mut map = std::collections::HashMap::new();
+        map.insert(1, (1u64, OsString::from(""))); // root
+                                                   // fid=99 has parent=50 which is missing
+        map.insert(99, (50u64, OsString::from("orphan.txt")));
+        let result = reconstruct_paths_cached(&[99], &map, Path::new("C:\\"));
+        // orphan — parent 50 not in map, so no base path found → not in result
+        assert!(result.get(&99).is_none());
+    }
+
+    #[test]
+    fn reconstruct_path_deep_chain() {
+        // 10 levels deep → valid path
+        let mut map = std::collections::HashMap::new();
+        map.insert(1, (1u64, OsString::from("")));
+        for i in 2u64..=11 {
+            map.insert(i, (i - 1, OsString::from(format!("d{i}"))));
+        }
+        let result = reconstruct_path(11, &map, Path::new("C:\\"));
+        assert!(result.is_some());
+        let path = result.unwrap();
+        // Should contain all directory components
+        let s = path.to_string_lossy();
+        assert!(s.contains("d11"));
+        assert!(s.contains("d2"));
     }
 
     /// This test requires admin privileges and a real NTFS volume.
