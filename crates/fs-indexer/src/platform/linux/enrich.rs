@@ -6,7 +6,7 @@
 
 use crate::error::FsIndexerResult;
 use crate::types::IndexEntry;
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use std::os::unix::fs::MetadataExt;
 
 /// Statistics from the enrichment pass.
@@ -88,6 +88,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::ffi::OsString;
     use std::path::PathBuf;
 

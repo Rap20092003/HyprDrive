@@ -103,61 +103,82 @@ fn read_max_watches() -> Option<usize> {
         .and_then(|s| s.trim().parse::<usize>().ok())
 }
 
-/// Standard watch mask for all inotify watches.
-const WATCH_MASK: WatchMask = WatchMask::from_bits_truncate(
-    WatchMask::CREATE.bits()
-        | WatchMask::DELETE.bits()
-        | WatchMask::MODIFY.bits()
-        | WatchMask::MOVED_FROM.bits()
-        | WatchMask::MOVED_TO.bits()
-        | WatchMask::ATTRIB.bits()
-        | WatchMask::DELETE_SELF.bits(),
-);
+/// Build the standard watch mask for all inotify watches.
+fn watch_mask() -> WatchMask {
+    WatchMask::CREATE
+        | WatchMask::DELETE
+        | WatchMask::MODIFY
+        | WatchMask::MOVED_FROM
+        | WatchMask::MOVED_TO
+        | WatchMask::ATTRIB
+        | WatchMask::DELETE_SELF
+}
+
+/// Collect directories to watch under `root`.
+fn collect_watch_dirs(root: &Path, recursive: bool) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+    if recursive {
+        for entry in jwalk::WalkDir::new(root)
+            .skip_hidden(false)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+        {
+            if entry.file_type().is_dir() && entry.depth() > 0 {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    dirs
+}
+
+/// Add a single inotify watch, returning the watch descriptor or an error.
+fn add_single_watch(
+    inotify: &mut Inotify,
+    dir: &Path,
+    mask: WatchMask,
+) -> Result<WatchDescriptor, std::io::Error> {
+    let mut watches = inotify.watches();
+    watches.add(dir, mask)
+}
 
 /// Set up recursive inotify watches on a directory tree.
+///
+/// Separated into small helper functions to work around a rustc ICE
+/// in `mir_borrowck` (affects stable 1.94 and nightly 1.96).
 fn setup_watches(
     root: &Path,
     recursive: bool,
 ) -> FsIndexerResult<(Inotify, HashMap<WatchDescriptor, PathBuf>)> {
-    let mut inotify = Inotify::init().map_err(|e| FsIndexerError::FanotifyError { source: e })?;
+    let mut inotify =
+        Inotify::init().map_err(|e| FsIndexerError::FanotifyError { source: e })?;
     let mut watch_map = HashMap::new();
+    let mask = watch_mask();
 
-    // Add root watch
-    let wd = inotify
-        .watches()
-        .add(root, WATCH_MASK)
-        .map_err(|e| FsIndexerError::FanotifyError { source: e })?;
-    watch_map.insert(wd, root.to_path_buf());
+    let dirs_to_watch = collect_watch_dirs(root, recursive);
 
-    if recursive {
-        // Walk all subdirectories and add watches
-        for entry_result in jwalk::WalkDir::new(root)
-            .skip_hidden(false)
-            .follow_links(false)
-        {
-            if let Ok(entry) = entry_result {
-                if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) && entry.depth() > 0 {
-                    let path = entry.path();
-                    match inotify.watches().add(&path, WATCH_MASK) {
-                        Ok(wd) => {
-                            watch_map.insert(wd, path);
-                        }
-                        Err(e) => {
-                            if e.raw_os_error() == Some(libc::ENOSPC) {
-                                let max = read_max_watches().unwrap_or(0);
-                                return Err(FsIndexerError::InotifyWatchLimit {
-                                    current: watch_map.len(),
-                                    max,
-                                });
-                            }
-                            tracing::warn!(
-                                path = %entry.path().display(),
-                                error = %e,
-                                "failed to add inotify watch, skipping"
-                            );
-                        }
-                    }
+    for dir in &dirs_to_watch {
+        match add_single_watch(&mut inotify, dir, mask) {
+            Ok(wd) => {
+                watch_map.insert(wd, dir.clone());
+            }
+            Err(e) => {
+                if e.raw_os_error() == Some(nix::libc::ENOSPC) {
+                    let max = read_max_watches().unwrap_or(0);
+                    return Err(FsIndexerError::InotifyWatchLimit {
+                        current: watch_map.len(),
+                        max,
+                    });
                 }
+                // First directory (root) is required — subsequent are best-effort
+                if watch_map.is_empty() {
+                    return Err(FsIndexerError::FanotifyError { source: e });
+                }
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "failed to add inotify watch, skipping"
+                );
             }
         }
     }
@@ -257,7 +278,7 @@ async fn event_loop(
 
                     // Add inotify watch for new directories
                     if is_dir && recursive {
-                        if let Ok(wd) = inotify.watches().add(&full_path, WATCH_MASK) {
+                        if let Ok(wd) = inotify.watches().add(&full_path, watch_mask()) {
                             watch_map.insert(wd, full_path.clone());
                         }
                     }

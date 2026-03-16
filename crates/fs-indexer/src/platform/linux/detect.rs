@@ -98,7 +98,7 @@ fn map_fstype(fs_type: &str) -> FilesystemKind {
 pub fn is_pseudo_filesystem(path: &Path) -> bool {
     match nix::sys::statfs::statfs(path) {
         Ok(stat) => {
-            let magic = stat.filesystem_type().0 as i64;
+            let magic = stat.filesystem_type().0;
             matches!(
                 magic,
                 PROC_SUPER_MAGIC

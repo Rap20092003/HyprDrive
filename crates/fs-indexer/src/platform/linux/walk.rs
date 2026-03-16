@@ -113,11 +113,7 @@ pub fn walk_directory(root: &Path, skip_pseudo: bool) -> FsIndexerResult<Vec<Top
         }
 
         // Detect symlinks via file_type (not metadata which follows symlinks)
-        let is_symlink = dir_entry
-            .file_type
-            .as_ref()
-            .map(|ft| ft.is_symlink())
-            .unwrap_or(false);
+        let is_symlink = dir_entry.file_type().is_symlink();
         let attributes: u32 = if is_symlink { 1 } else { 0 };
 
         entries.push(TopoEntry {
