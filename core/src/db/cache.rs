@@ -99,6 +99,31 @@ pub mod inode {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Look up multiple keys in a single read transaction.
+    ///
+    /// Returns results in the same order as input keys.
+    /// Missing keys return `None` in their position.
+    /// Much more efficient than calling [`get`] in a loop because
+    /// it amortises the transaction overhead across all lookups.
+    pub fn get_batch(db: &Database, keys: &[&str]) -> Result<Vec<Option<String>>, redb::Error> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let txn = db.begin_read()?;
+        match txn.open_table(INODE_CACHE) {
+            Ok(table) => {
+                let mut results = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let value = table.get(*key)?.map(|v| v.value().to_string());
+                    results.push(value);
+                }
+                Ok(results)
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(vec![None; keys.len()]),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// Thumbnail manifest operations.
@@ -326,6 +351,42 @@ mod tests {
         inode::insert(&db, &key, "obj_new").expect("overwrite");
         let result = inode::get(&db, &key).expect("get");
         assert_eq!(result.as_deref(), Some("obj_new"));
+    }
+
+    #[test]
+    fn test_inode_get_batch_all_hits() {
+        let (db, _dir) = test_db();
+        inode::insert(&db, "a", "1").unwrap();
+        inode::insert(&db, "b", "2").unwrap();
+        inode::insert(&db, "c", "3").unwrap();
+        let results = inode::get_batch(&db, &["a", "b", "c"]).unwrap();
+        assert_eq!(
+            results,
+            vec![Some("1".into()), Some("2".into()), Some("3".into())]
+        );
+    }
+
+    #[test]
+    fn test_inode_get_batch_mixed_hits_misses() {
+        let (db, _dir) = test_db();
+        inode::insert(&db, "x", "val").unwrap();
+        let results = inode::get_batch(&db, &["x", "missing", "also_missing"]).unwrap();
+        assert_eq!(results, vec![Some("val".into()), None, None]);
+    }
+
+    #[test]
+    fn test_inode_get_batch_empty() {
+        let (db, _dir) = test_db();
+        let results = inode::get_batch(&db, &[]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_inode_get_batch_no_table_yet() {
+        // Fresh DB with no writes — table doesn't exist
+        let (db, _dir) = test_db();
+        let results = inode::get_batch(&db, &["a", "b"]).unwrap();
+        assert_eq!(results, vec![None, None]);
     }
 
     // ═══ Thumb Manifest Tests ═══
