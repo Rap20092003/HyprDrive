@@ -49,18 +49,12 @@ pub fn read_cursor(volume: &Path) -> FsIndexerResult<UsnCursor> {
     let letter = drive_letter(volume)?;
 
     let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
     })?;
 
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
     let journal_data = journal.query(false).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
     })?;
 
     Ok(UsnCursor {
@@ -86,10 +80,7 @@ pub fn poll_changes(
     let letter = drive_letter(volume)?;
 
     let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
     })?;
 
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
@@ -97,10 +88,7 @@ pub fn poll_changes(
     // Create enum options starting from the cursor's next_usn
     let options = usn_journal_rs::journal::EnumOptions::default();
     let journal_iter = journal.iter_with_options(options).map_err(|e| {
-        FsIndexerError::JournalError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
+        FsIndexerError::JournalError(std::io::Error::other(e.to_string()))
     })?;
 
     let mut changes = Vec::new();

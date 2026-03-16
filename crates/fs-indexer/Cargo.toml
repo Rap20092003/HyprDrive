@@ -13,6 +13,8 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio-util = { workspace = true }
+redb = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 usn-journal-rs = "0.4"

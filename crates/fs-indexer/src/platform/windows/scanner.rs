@@ -123,7 +123,7 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         let full_path = dir_entry.path();
         let size = metadata.len();
         // FAT32 doesn't expose allocation size — estimate from 4KB clusters
-        let allocated_size = if size == 0 { 0 } else { ((size + 4095) / 4096) * 4096 };
+        let allocated_size = if size == 0 { 0 } else { size.div_ceil(4096) * 4096 };
         let modified_at = metadata
             .modified()
             .ok()

@@ -60,6 +60,13 @@ pub enum FsChange {
         /// New logical size after modification.
         new_size: u64,
     },
+    /// A full rescan is needed (e.g. USN journal wrapped or journal_id changed).
+    FullRescanNeeded {
+        /// Volume path that needs rescanning.
+        volume: PathBuf,
+        /// Human-readable reason for the rescan.
+        reason: String,
+    },
 }
 
 /// Detected filesystem type for a volume.
@@ -93,7 +100,7 @@ pub struct TopoEntry {
 }
 
 /// USN journal cursor for tracking delta position.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsnCursor {
     /// The USN journal ID.
     pub journal_id: u64,
@@ -134,6 +141,21 @@ mod tests {
         assert_eq!(cursor.journal_id, back.journal_id);
         assert_eq!(cursor.next_usn, back.next_usn);
         Ok(())
+    }
+
+    #[test]
+    fn fs_change_full_rescan_needed() {
+        let change = FsChange::FullRescanNeeded {
+            volume: PathBuf::from("C:\\"),
+            reason: "USN journal wrapped".to_string(),
+        };
+        match &change {
+            FsChange::FullRescanNeeded { volume, reason } => {
+                assert_eq!(volume, &PathBuf::from("C:\\"));
+                assert_eq!(reason, "USN journal wrapped");
+            }
+            _ => panic!("expected FullRescanNeeded"),
+        }
     }
 
     #[test]

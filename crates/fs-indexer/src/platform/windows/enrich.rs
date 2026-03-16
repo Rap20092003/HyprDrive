@@ -17,6 +17,7 @@ const ENRICH_BATCH_SIZE: usize = 1000;
 ///
 /// Files that cannot be opened (access denied, locked) get `size = 0`
 /// and a warning is logged per ADR-007.
+#[allow(unsafe_code)]
 #[tracing::instrument(skip(entries), fields(count = entries.len()))]
 pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
     use std::os::windows::ffi::OsStrExt;

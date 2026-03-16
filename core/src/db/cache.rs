@@ -1,12 +1,13 @@
 #![allow(clippy::result_large_err)]
 //! redb caches for hot-path lookups.
 //!
-//! Five typed caches per the plan (§2.4):
+//! Six typed caches per the plan (§2.4 + §3.5):
 //! 1. INODE_CACHE: (vol, inode, mtime) → object_id
 //! 2. THUMB_MANIFEST: object_id → ThumbRecord
 //! 3. QUERY_CACHE: query_hash → serialized result
 //! 4. XFER_CHECKPOINTS: transfer_id → checkpoint
 //! 5. DIR_SIZE_CACHE: location_id → DirSizeRecord
+//! 6. USN_CURSORS: volume_key → JSON UsnCursor (Phase 3.5)
 
 use redb::{Database, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,9 @@ const XFER_CHECKPOINTS: TableDefinition<&str, &str> = TableDefinition::new("xfer
 
 /// Directory size cache: key = location_id, value = JSON DirSizeRecord
 const DIR_SIZE_CACHE: TableDefinition<&str, &str> = TableDefinition::new("dir_size_cache");
+
+/// USN journal cursor cache: key = volume letter (e.g. "C"), value = JSON UsnCursor
+const USN_CURSORS: TableDefinition<&str, &str> = TableDefinition::new("usn_cursors");
 
 // ═══ Types ═══
 
@@ -169,6 +173,79 @@ pub mod xfer {
         {
             let mut table = txn.open_table(XFER_CHECKPOINTS)?;
             table.remove(transfer_id)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+}
+
+/// USN journal cursor persistence for real-time monitoring.
+///
+/// Stores the last-known USN journal cursor per volume so the listener
+/// can resume after daemon restart without missing filesystem changes.
+pub mod cursor {
+    use super::*;
+
+    /// USN journal cursor for tracking delta position.
+    ///
+    /// Stored as JSON in redb, keyed by volume letter (e.g. "C").
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct UsnCursorRecord {
+        /// The USN journal ID — changes if journal is deleted/recreated.
+        pub journal_id: u64,
+        /// The next USN to read from.
+        pub next_usn: i64,
+    }
+
+    /// Save a USN cursor for a volume.
+    #[tracing::instrument(skip(db), fields(volume_key))]
+    pub fn save(
+        db: &Database,
+        volume_key: &str,
+        record: &UsnCursorRecord,
+    ) -> Result<(), redb::Error> {
+        let json = serde_json::to_string(record).map_err(|e| {
+            redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(USN_CURSORS)?;
+            table.insert(volume_key, json.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Load a USN cursor for a volume. Returns `None` if not found.
+    #[tracing::instrument(skip(db), fields(volume_key))]
+    pub fn load(db: &Database, volume_key: &str) -> Result<Option<UsnCursorRecord>, redb::Error> {
+        let txn = db.begin_read()?;
+        match txn.open_table(USN_CURSORS) {
+            Ok(table) => match table.get(volume_key)? {
+                Some(v) => {
+                    let record: UsnCursorRecord =
+                        serde_json::from_str(v.value()).map_err(|e| {
+                            redb::Error::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                e,
+                            ))
+                        })?;
+                    Ok(Some(record))
+                }
+                None => Ok(None),
+            },
+            Err(redb::TableError::TableDoesNotExist(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Delete a USN cursor for a volume.
+    #[tracing::instrument(skip(db), fields(volume_key))]
+    pub fn delete(db: &Database, volume_key: &str) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(USN_CURSORS)?;
+            table.remove(volume_key)?;
         }
         txn.commit()?;
         Ok(())
@@ -324,6 +401,77 @@ mod tests {
         let result = dir_size::get(&db, "loc1").expect("get").expect("some");
         assert_eq!(result.file_count, 42);
         assert_eq!(result.cumulative_allocated, 2 * 1024 * 1024);
+    }
+
+    // ═══ USN Cursor Tests ═══
+
+    #[test]
+    fn test_cursor_save_and_load() {
+        let (db, _dir) = test_db();
+        let record = cursor::UsnCursorRecord {
+            journal_id: 12345,
+            next_usn: 67890,
+        };
+        cursor::save(&db, "C", &record).expect("save");
+        let loaded = cursor::load(&db, "C").expect("load");
+        assert_eq!(loaded, Some(record));
+    }
+
+    #[test]
+    fn test_cursor_miss() {
+        let (db, _dir) = test_db();
+        let result = cursor::load(&db, "Z").expect("load");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_cursor_overwrite() {
+        let (db, _dir) = test_db();
+        let r1 = cursor::UsnCursorRecord {
+            journal_id: 100,
+            next_usn: 200,
+        };
+        cursor::save(&db, "C", &r1).expect("save");
+
+        let r2 = cursor::UsnCursorRecord {
+            journal_id: 100,
+            next_usn: 500,
+        };
+        cursor::save(&db, "C", &r2).expect("overwrite");
+
+        let loaded = cursor::load(&db, "C").expect("load");
+        assert_eq!(loaded, Some(r2));
+    }
+
+    #[test]
+    fn test_cursor_delete() {
+        let (db, _dir) = test_db();
+        let record = cursor::UsnCursorRecord {
+            journal_id: 1,
+            next_usn: 2,
+        };
+        cursor::save(&db, "D", &record).expect("save");
+        cursor::delete(&db, "D").expect("delete");
+        let result = cursor::load(&db, "D").expect("load");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_cursor_multiple_volumes() {
+        let (db, _dir) = test_db();
+        let c_cursor = cursor::UsnCursorRecord {
+            journal_id: 1,
+            next_usn: 100,
+        };
+        let d_cursor = cursor::UsnCursorRecord {
+            journal_id: 2,
+            next_usn: 200,
+        };
+        cursor::save(&db, "C", &c_cursor).expect("save C");
+        cursor::save(&db, "D", &d_cursor).expect("save D");
+
+        assert_eq!(cursor::load(&db, "C").expect("load"), Some(c_cursor));
+        assert_eq!(cursor::load(&db, "D").expect("load"), Some(d_cursor));
     }
 
     #[test]

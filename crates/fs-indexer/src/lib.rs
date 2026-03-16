@@ -39,3 +39,6 @@ pub use platform::windows::detect::detect_filesystem;
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::usn::{poll_changes, read_cursor};
+
+#[cfg(target_os = "windows")]
+pub use platform::windows::listener::{CursorStore, ListenerConfig, NoCursorStore, UsnListener};

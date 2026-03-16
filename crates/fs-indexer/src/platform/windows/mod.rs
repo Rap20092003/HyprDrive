@@ -8,6 +8,7 @@
 
 pub mod detect;
 pub mod enrich;
+pub mod listener;
 pub mod mft;
 pub mod scanner;
 pub mod usn;

@@ -8,6 +8,7 @@ use std::path::Path;
 ///
 /// Uses `GetVolumeInformationW` to query the filesystem name string,
 /// then maps it to a [`FilesystemKind`].
+#[allow(unsafe_code)]
 #[tracing::instrument(fields(volume = %volume.display()))]
 pub fn detect_filesystem(volume: &Path) -> FsIndexerResult<FilesystemKind> {
     use std::ffi::OsStr;
