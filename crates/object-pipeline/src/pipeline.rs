@@ -105,7 +105,12 @@ impl ObjectPipeline {
         let mut total_skipped = 0usize;
         let mut total_errors = 0usize;
 
-        for chunk in working_entries.chunks(self.config.batch_size) {
+        let num_batches = (working_entries.len() + self.config.batch_size - 1) / self.config.batch_size;
+        tracing::info!(entries = working_entries.len(), batches = num_batches, "starting pipeline");
+
+        for (batch_idx, chunk) in working_entries.chunks(self.config.batch_size).enumerate() {
+            tracing::info!(batch = batch_idx + 1, of = num_batches, chunk_size = chunk.len(), "processing batch");
+
             // Collect owned entries for the hasher (it expects a slice of IndexEntry).
             let chunk_owned: Vec<IndexEntry> = chunk.iter().map(|e| (*e).clone()).collect();
 
