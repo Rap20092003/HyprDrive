@@ -43,10 +43,10 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          cargo bench -p hyprdrive-core -- --save-baseline current
-          cargo bench -p hyprdrive-dedup-engine -- --save-baseline current
-          cargo bench -p hyprdrive-fs-indexer -- --save-baseline current
-          cargo bench -p hyprdrive-object-pipeline -- --save-baseline current
+          cargo bench -p hyprdrive-core --bench benchmarks -- --save-baseline current
+          cargo bench -p hyprdrive-dedup-engine --bench dedup_benchmarks -- --save-baseline current
+          cargo bench -p hyprdrive-fs-indexer --bench scan_benchmarks -- --save-baseline current
+          cargo bench -p hyprdrive-object-pipeline --bench pipeline_benchmarks -- --save-baseline current
 
       - name: Compare against baseline (PR only)
         if: github.event_name == 'pull_request'
