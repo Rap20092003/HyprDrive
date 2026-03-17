@@ -150,7 +150,8 @@ fn setup_watches(
     root: &Path,
     recursive: bool,
 ) -> FsIndexerResult<(Inotify, HashMap<WatchDescriptor, PathBuf>)> {
-    let mut inotify = Inotify::init().map_err(|e| FsIndexerError::FanotifyError { source: e })?;
+    let mut inotify =
+        Inotify::init().map_err(|e| FsIndexerError::WatcherInitError { source: e })?;
     let mut watch_map = HashMap::new();
     let mask = watch_mask();
 
@@ -171,7 +172,7 @@ fn setup_watches(
                 }
                 // First directory (root) is required — subsequent are best-effort
                 if watch_map.is_empty() {
-                    return Err(FsIndexerError::FanotifyError { source: e });
+                    return Err(FsIndexerError::WatcherInitError { source: e });
                 }
                 tracing::warn!(
                     path = %dir.display(),

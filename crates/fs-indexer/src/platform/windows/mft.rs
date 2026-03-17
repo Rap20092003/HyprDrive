@@ -25,22 +25,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 /// Win32 file attribute flag for reparse points (junctions, symlinks).
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-/// Extract drive letter from a path like `C:\` → `'C'`.
-fn drive_letter_from_path(volume: &Path) -> FsIndexerResult<char> {
-    let s = volume.to_string_lossy();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        Ok(bytes[0] as char)
-    } else {
-        Err(FsIndexerError::MftAccess {
-            volume: volume.display().to_string(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "expected a drive letter path like C:\\",
-            ),
-        })
-    }
-}
+use super::util::drive_letter_from_path;
 
 /// Enumerate the MFT topology of an NTFS volume.
 ///

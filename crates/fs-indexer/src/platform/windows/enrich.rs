@@ -6,6 +6,15 @@
 use crate::error::FsIndexerResult;
 use crate::types::IndexEntry;
 
+/// Statistics from the enrichment pass.
+#[derive(Debug, Clone)]
+pub struct EnrichStats {
+    /// Number of entries successfully enriched.
+    pub enriched: u64,
+    /// Number of entries skipped (access denied, locked, etc.).
+    pub skipped: u64,
+}
+
 /// Batch size for handle operations to avoid handle exhaustion.
 const ENRICH_BATCH_SIZE: usize = 1000;
 
@@ -32,7 +41,7 @@ impl Drop for SafeHandle {
 /// and a warning is logged per ADR-007.
 #[allow(unsafe_code)]
 #[tracing::instrument(skip(entries), fields(count = entries.len()))]
-pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
+pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_NORMAL,
@@ -98,8 +107,8 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
             };
 
             if info_result.is_ok() {
-                entry.size = file_info.EndOfFile as u64;
-                entry.allocated_size = file_info.AllocationSize as u64;
+                entry.size = file_info.EndOfFile.max(0) as u64;
+                entry.allocated_size = file_info.AllocationSize.max(0) as u64;
                 enriched += 1;
             } else {
                 tracing::warn!(
@@ -114,7 +123,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<()> {
 
     tracing::info!(total, enriched, skipped, "size enrichment complete");
 
-    Ok(())
+    Ok(EnrichStats { enriched, skipped })
 }
 
 #[cfg(test)]

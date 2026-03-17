@@ -8,6 +8,9 @@ use crate::types::{FilesystemKind, IndexEntry, ScanResult};
 use chrono::Utc;
 use std::path::Path;
 
+/// Minimum synthetic FID for jwalk entries (avoids collision with NTFS FRNs).
+const MIN_SYNTHETIC_FID: u64 = 1_000_000_000;
+
 /// Perform a full scan of an NTFS volume.
 ///
 /// 1. Detects filesystem type (must be NTFS).
@@ -19,10 +22,14 @@ use std::path::Path;
 /// For non-NTFS volumes, use [`fallback_scan`] instead.
 #[tracing::instrument(fields(volume = %volume.display()), skip(volume))]
 pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
+    let fs_kind = detect::detect_filesystem(volume)?;
+    full_scan_inner(volume, fs_kind)
+}
+
+fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<ScanResult> {
     let start = std::time::Instant::now();
 
     // Phase 0: Verify NTFS
-    let fs_kind = detect::detect_filesystem(volume)?;
     if fs_kind != FilesystemKind::Ntfs {
         return Err(FsIndexerError::UnsupportedFs { kind: fs_kind });
     }
@@ -66,7 +73,8 @@ pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         .collect();
 
     // Phase 3: Size enrichment
-    enrich::enrich_sizes(&mut entries)?;
+    let enrich_stats = enrich::enrich_sizes(&mut entries)?;
+    tracing::debug!(?enrich_stats, "enrichment complete");
 
     let duration = start.elapsed();
     tracing::info!(
@@ -194,9 +202,6 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     })
 }
 
-/// Minimum synthetic FID for jwalk entries (avoids collision with NTFS FRNs).
-const MIN_SYNTHETIC_FID: u64 = 1_000_000_000;
-
 /// Auto-detect filesystem and choose the best scan strategy.
 ///
 /// - NTFS → MFT scan (fast, requires admin)
@@ -207,7 +212,7 @@ pub fn auto_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     let fs_kind = detect::detect_filesystem(volume)?;
 
     match fs_kind {
-        FilesystemKind::Ntfs => match full_scan(volume) {
+        FilesystemKind::Ntfs => match full_scan_inner(volume, fs_kind) {
             Ok(result) => Ok(result),
             Err(FsIndexerError::MftAccess { volume: v, .. }) => {
                 tracing::warn!(

@@ -52,10 +52,10 @@ pub enum FsIndexerError {
         parent_fid: u64,
     },
 
-    /// fanotify initialization or watch failed.
-    #[error("fanotify error: {source}")]
-    FanotifyError {
-        /// Underlying I/O error from fanotify.
+    /// Filesystem watcher initialization failed (inotify or fanotify).
+    #[error("watcher init error: {source}")]
+    WatcherInitError {
+        /// Underlying I/O error from inotify/fanotify initialization.
         source: std::io::Error,
     },
 

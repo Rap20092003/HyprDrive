@@ -26,19 +26,7 @@ const USN_REASON_DATA_EXTEND: u32 = 0x00000002;
 const USN_REASON_DATA_TRUNCATION: u32 = 0x00000004;
 const USN_REASON_DATA_OVERWRITE: u32 = 0x00000001;
 
-/// Extract drive letter from path.
-fn drive_letter(volume: &Path) -> FsIndexerResult<char> {
-    let s = volume.to_string_lossy();
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        Ok(bytes[0] as char)
-    } else {
-        Err(FsIndexerError::JournalError(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "expected drive letter path like C:\\",
-        )))
-    }
-}
+use super::util::drive_letter_from_path;
 
 /// Read the current USN journal cursor position for a volume.
 ///
@@ -46,7 +34,7 @@ fn drive_letter(volume: &Path) -> FsIndexerResult<char> {
 /// for subsequent delta queries.
 #[tracing::instrument(fields(volume = %volume.display()), skip(volume))]
 pub fn read_cursor(volume: &Path) -> FsIndexerResult<UsnCursor> {
-    let letter = drive_letter(volume)?;
+    let letter = drive_letter_from_path(volume)?;
 
     let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter)
         .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
@@ -76,7 +64,7 @@ pub fn poll_changes(
     volume: &Path,
     cursor: &UsnCursor,
 ) -> FsIndexerResult<(Vec<FsChange>, UsnCursor)> {
-    let letter = drive_letter(volume)?;
+    let letter = drive_letter_from_path(volume)?;
 
     let vol = usn_journal_rs::volume::Volume::from_drive_letter(letter)
         .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
@@ -177,17 +165,17 @@ mod tests {
 
     #[test]
     fn drive_letter_extraction() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(drive_letter(Path::new("C:\\"))?, 'C');
-        assert!(drive_letter(Path::new("/mnt/data")).is_err());
+        assert_eq!(drive_letter_from_path(Path::new("C:\\"))?, 'C');
+        assert!(drive_letter_from_path(Path::new("/mnt/data")).is_err());
         Ok(())
     }
 
     #[test]
     fn drive_letter_various_letters() {
-        assert_eq!(drive_letter(Path::new("D:\\")).unwrap(), 'D');
-        assert_eq!(drive_letter(Path::new("E:\\Users")).unwrap(), 'E');
-        assert!(drive_letter(Path::new("")).is_err());
-        assert!(drive_letter(Path::new("1:\\")).is_err());
+        assert_eq!(drive_letter_from_path(Path::new("D:\\")).unwrap(), 'D');
+        assert_eq!(drive_letter_from_path(Path::new("E:\\Users")).unwrap(), 'E');
+        assert!(drive_letter_from_path(Path::new("")).is_err());
+        assert!(drive_letter_from_path(Path::new("1:\\")).is_err());
     }
 
     #[test]

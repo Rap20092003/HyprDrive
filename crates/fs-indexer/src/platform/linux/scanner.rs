@@ -77,10 +77,14 @@ fn reconstruct_path(
 /// 5. Returns [`ScanResult`] with [`LinuxCursor`]
 #[tracing::instrument(fields(root = %root.display()), skip(root))]
 pub fn full_scan(root: &Path) -> FsIndexerResult<ScanResult> {
+    let fs_kind = detect::detect_filesystem(root)?;
+    full_scan_inner(root, fs_kind)
+}
+
+fn full_scan_inner(root: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<ScanResult> {
     let start = std::time::Instant::now();
 
-    // Phase 0: Detect filesystem
-    let fs_kind = detect::detect_filesystem(root)?;
+    // Phase 0: Check filesystem kind
     if fs_kind == FilesystemKind::NineP {
         tracing::warn!(
             "9p mount detected — consider indexing from the Windows side for better performance"
@@ -119,7 +123,8 @@ pub fn full_scan(root: &Path) -> FsIndexerResult<ScanResult> {
         .collect();
 
     // Phase 3: Size enrichment
-    enrich::enrich_sizes(&mut entries)?;
+    let enrich_stats = enrich::enrich_sizes(&mut entries)?;
+    tracing::debug!(?enrich_stats, "enrichment complete");
 
     let duration = start.elapsed();
     tracing::info!(
@@ -161,12 +166,11 @@ pub fn fallback_scan(root: &Path) -> FsIndexerResult<ScanResult> {
 /// to avoid redundant `/proc/mounts` reads.
 #[tracing::instrument(fields(root = %root.display()), skip(root))]
 pub fn auto_scan(root: &Path) -> FsIndexerResult<ScanResult> {
-    // Let PseudoFilesystem error propagate — detected once, reused below
-    let _fs_kind = detect::detect_filesystem(root)?;
+    let fs_kind = detect::detect_filesystem(root)?;
 
-    tracing::info!(fs = ?_fs_kind, "auto-detected filesystem, starting scan");
+    tracing::info!(fs = ?fs_kind, "auto-detected filesystem, starting scan");
 
-    match full_scan(root) {
+    match full_scan_inner(root, fs_kind) {
         Ok(result) => Ok(result),
         Err(FsIndexerError::PermissionDenied { path }) => {
             tracing::warn!(

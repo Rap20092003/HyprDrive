@@ -120,7 +120,9 @@ pub fn walk_directory(root: &Path, skip_pseudo: bool) -> FsIndexerResult<Vec<Top
 
         // Detect symlinks via file_type (not metadata which follows symlinks)
         let is_symlink = dir_entry.file_type().is_symlink();
-        let attributes: u32 = if is_symlink { 1 } else { 0 };
+        /// Synthetic attribute flag for symlinks (no Win32 equivalent on Linux).
+        const ATTR_SYMLINK: u32 = 1;
+        let attributes: u32 = if is_symlink { ATTR_SYMLINK } else { 0 };
 
         entries.push(TopoEntry {
             fid,
