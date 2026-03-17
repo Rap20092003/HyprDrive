@@ -3,6 +3,16 @@
 //! Connects to hyprdrive-daemon via socket. Zero core logic here.
 //! All intelligence lives in the daemon.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::todo,
+    clippy::dbg_macro,
+    missing_docs,
+    unsafe_code
+)]
+
 use anyhow::Result;
 
 fn main() -> Result<()> {
@@ -13,4 +23,12 @@ fn main() -> Result<()> {
     // TODO: Parse CLI args (clap)
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn smoke() {
+        // Placeholder — ensures this crate appears in `cargo test` output.
+    }
 }

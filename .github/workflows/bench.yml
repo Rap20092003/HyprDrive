@@ -3,6 +3,8 @@ name: Benchmarks
 on:
   push:
     branches: [master]
+  pull_request:
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,5 +32,39 @@ jobs:
           key: bench-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: bench-
 
+      - name: Install critcmp
+        run: cargo install critcmp --force || true
+
+      - name: Restore baseline benchmarks
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion-baseline
+          key: bench-baseline-${{ github.base_ref || 'master' }}
+
       - name: Run benchmarks
-        run: cargo bench --workspace
+        run: cargo bench --workspace -- --save-baseline current
+
+      - name: Compare against baseline (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -d target/criterion-baseline ]; then
+            echo "## Benchmark Comparison" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            critcmp target/criterion-baseline target/criterion/current --threshold 15 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No baseline found — skipping comparison" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Save baseline (master only)
+        if: github.ref == 'refs/heads/master'
+        run: |
+          rm -rf target/criterion-baseline
+          cp -r target/criterion target/criterion-baseline
+
+      - name: Cache baseline benchmarks (master only)
+        if: github.ref == 'refs/heads/master'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion-baseline
+          key: bench-baseline-master
