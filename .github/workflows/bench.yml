@@ -42,7 +42,11 @@ jobs:
           key: bench-baseline-${{ github.base_ref || 'master' }}
 
       - name: Run benchmarks
-        run: cargo bench --workspace -- --save-baseline current
+        run: |
+          cargo bench -p hyprdrive-core -- --save-baseline current
+          cargo bench -p hyprdrive-dedup-engine -- --save-baseline current
+          cargo bench -p hyprdrive-fs-indexer -- --save-baseline current
+          cargo bench -p hyprdrive-object-pipeline -- --save-baseline current
 
       - name: Compare against baseline (PR only)
         if: github.event_name == 'pull_request'
