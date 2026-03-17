@@ -44,11 +44,12 @@ async fn main() -> Result<()> {
     info!("database ready");
 
     let cache_path = data_dir.join("cache.redb");
-    let _cache =
+    #[allow(unused_variables)]
+    let cache =
         hyprdrive_core::db::cache::open_cache(&cache_path).context("failed to open redb cache")?;
     info!(path = %cache_path.display(), "redb hot-cache ready");
 
-    // ── Phase 3: Volume scanning (stub) ──
+    // ── Phase 3: Volume scanning ──
     // Auto-detect filesystem and scan using the best available strategy.
     // MFT scan requires admin — falls back to jwalk automatically.
     #[cfg(target_os = "windows")]
@@ -61,8 +62,30 @@ async fn main() -> Result<()> {
                     has_cursor = result.cursor.is_some(),
                     "volume scan complete"
                 );
-                // TODO Phase 7: hash entries → insert into objects table via pool
-                // TODO Phase 8: compute disk intelligence (treemap, dir sizes)
+
+                // ── Phase 7: Hash entries → insert into objects table ──
+                let volume_id = "C".to_string(); // FIXME(phase-6): derive VolumeId from VolumeIndexer trait
+                let config = hyprdrive_object_pipeline::PipelineConfig::new(volume_id);
+                let pipeline =
+                    hyprdrive_object_pipeline::ObjectPipeline::new(config, pool.clone(), cache);
+                match pipeline.process_entries(&result.entries).await {
+                    Ok(stats) => {
+                        info!(
+                            total = stats.total,
+                            hashed = stats.hashed,
+                            cached = stats.cached,
+                            skipped = stats.skipped,
+                            errors = stats.errors,
+                            elapsed_ms = stats.elapsed.as_millis() as u64,
+                            "object pipeline complete"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "object pipeline failed");
+                    }
+                }
+
+                // FIXME(phase-8): compute disk intelligence (treemap, directory sizes, waste analysis)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "volume scan failed — will retry on next cycle");
@@ -70,10 +93,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // TODO Phase 9: Start EventBus
-    // TODO Phase 10: Start file watchers
-    // TODO Phase 13: Start Iroh P2P node
-    // TODO Phase 13: Start Axum HTTP server on :7421
+    // FIXME(phase-9): start EventBus (tokio::broadcast channel for domain events)
+    // FIXME(phase-10): start file watchers (UsnListener on Windows, inotify on Linux)
+    // FIXME(phase-13): start Iroh P2P node for device sync
+    // FIXME(phase-13): start Axum HTTP server on :7421 for UI/CLI clients
 
     // Graceful shutdown: wait for Ctrl+C
     info!("Daemon ready. Press Ctrl+C to stop.");

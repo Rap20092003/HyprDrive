@@ -843,11 +843,14 @@ name = "hyprdrive-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "hyprdrive-core",
  "hyprdrive-fs-indexer",
+ "hyprdrive-object-pipeline",
  "redb",
  "sqlx",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -932,6 +935,25 @@ version = "0.1.0"
 [[package]]
 name = "hyprdrive-media-metadata"
 version = "0.1.0"
+
+[[package]]
+name = "hyprdrive-object-pipeline"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "criterion",
+ "hyprdrive-core",
+ "hyprdrive-dedup-engine",
+ "hyprdrive-fs-indexer",
+ "rayon",
+ "redb",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "hyprdrive-sdk"

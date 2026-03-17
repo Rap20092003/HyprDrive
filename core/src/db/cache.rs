@@ -76,6 +76,14 @@ pub mod inode {
         format!("{volume_id}:{inode}:{mtime}")
     }
 
+    /// Build a cache key from volume, inode, mtime, AND size.
+    ///
+    /// Stronger invalidation than [`cache_key`]: detects in-place overwrites
+    /// where mtime is preserved but size changes (e.g. truncation).
+    pub fn cache_key_v2(volume_id: &str, inode: u64, mtime: i64, size: u64) -> String {
+        format!("{volume_id}:{inode}:{mtime}:{size}")
+    }
+
     /// Insert an entry into the inode cache.
     pub fn insert(db: &Database, key: &str, object_id: &str) -> Result<(), redb::Error> {
         let txn = db.begin_write()?;
@@ -123,6 +131,25 @@ pub mod inode {
             Err(redb::TableError::TableDoesNotExist(_)) => Ok(vec![None; keys.len()]),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Insert multiple entries in a single write transaction.
+    ///
+    /// Much more efficient than calling [`insert`] in a loop because
+    /// it amortises the transaction + fsync overhead across all writes.
+    pub fn insert_batch(db: &Database, entries: &[(&str, &str)]) -> Result<(), redb::Error> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(INODE_CACHE)?;
+            for (key, object_id) in entries {
+                table.insert(*key, *object_id)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
     }
 }
 
@@ -387,6 +414,48 @@ mod tests {
         let (db, _dir) = test_db();
         let results = inode::get_batch(&db, &["a", "b"]).unwrap();
         assert_eq!(results, vec![None, None]);
+    }
+
+    // ═══ Inode Cache v2 Key Tests ═══
+
+    #[test]
+    fn test_cache_key_v2_format() {
+        let key = inode::cache_key_v2("vol1", 12345, 1700000000, 4096);
+        assert_eq!(key, "vol1:12345:1700000000:4096");
+    }
+
+    #[test]
+    fn test_cache_key_v2_different_size_different_key() {
+        let k1 = inode::cache_key_v2("vol1", 100, 999, 4096);
+        let k2 = inode::cache_key_v2("vol1", 100, 999, 8192);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_inode_insert_batch_empty() {
+        let (db, _dir) = test_db();
+        inode::insert_batch(&db, &[]).unwrap();
+        // No crash, no-op
+    }
+
+    #[test]
+    fn test_inode_insert_batch_multiple() {
+        let (db, _dir) = test_db();
+        let entries = vec![("k1", "obj1"), ("k2", "obj2"), ("k3", "obj3")];
+        inode::insert_batch(&db, &entries).unwrap();
+
+        assert_eq!(inode::get(&db, "k1").unwrap().as_deref(), Some("obj1"));
+        assert_eq!(inode::get(&db, "k2").unwrap().as_deref(), Some("obj2"));
+        assert_eq!(inode::get(&db, "k3").unwrap().as_deref(), Some("obj3"));
+    }
+
+    #[test]
+    fn test_inode_insert_batch_overwrites() {
+        let (db, _dir) = test_db();
+        inode::insert(&db, "k1", "old_value").unwrap();
+        inode::insert_batch(&db, &[("k1", "new_value"), ("k2", "v2")]).unwrap();
+        assert_eq!(inode::get(&db, "k1").unwrap().as_deref(), Some("new_value"));
+        assert_eq!(inode::get(&db, "k2").unwrap().as_deref(), Some("v2"));
     }
 
     // ═══ Thumb Manifest Tests ═══

@@ -1,0 +1,30 @@
+[package]
+name = "hyprdrive-object-pipeline"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hyprdrive-core = { path = "../../core" }
+hyprdrive-dedup-engine = { path = "../dedup-engine", default-features = false, features = [] }
+hyprdrive-fs-indexer = { path = "../fs-indexer" }
+
+blake3 = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+redb = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[[bench]]
+name = "pipeline_benchmarks"
+harness = false

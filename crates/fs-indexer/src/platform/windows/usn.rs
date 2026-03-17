@@ -71,6 +71,20 @@ pub fn poll_changes(
 
     let journal = usn_journal_rs::journal::UsnJournal::new(&vol);
 
+    // Validate that the journal has not been deleted and recreated since our cursor.
+    let journal_data = journal
+        .query(false)
+        .map_err(|e| FsIndexerError::JournalError(std::io::Error::other(e.to_string())))?;
+    if journal_data.journal_id != cursor.journal_id {
+        return Err(FsIndexerError::JournalError(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "USN journal recreated (expected journal_id={}, got {}) — full rescan required",
+                cursor.journal_id, journal_data.journal_id
+            ),
+        )));
+    }
+
     // Create enum options starting from the cursor's next_usn
     let options = usn_journal_rs::journal::EnumOptions {
         start_usn: cursor.next_usn,

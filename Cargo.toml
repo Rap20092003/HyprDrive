@@ -16,6 +16,7 @@ members = [
     "crates/actors",
     "crates/utils",
     "crates/dedup-engine",
+    "crates/object-pipeline",
     "apps/daemon",
     "apps/cli",
     "helpers/hyprdrive-helper-windows",

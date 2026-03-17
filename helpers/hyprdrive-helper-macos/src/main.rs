@@ -23,7 +23,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         println!("HyprDrive macOS Helper v{}", env!("CARGO_PKG_VERSION"));
-        // TODO Phase 4: XPC service + getattrlistbulk
+        // FIXME(phase-5): XPC service + getattrlistbulk for Full Disk Access scanning
     }
 }
 

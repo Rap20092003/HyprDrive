@@ -8,10 +8,11 @@
 
 #[cfg(feature = "perceptual")]
 use crate::error::DeduplicateError;
+#[cfg(feature = "perceptual")]
 use crate::FileEntry;
 
 /// Image file extensions recognized by the perceptual matcher.
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff", "tif"];
+pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "gif", "tiff", "tif"];
 
 /// Check if a file extension indicates an image.
 pub fn is_image(ext: &str) -> bool {
