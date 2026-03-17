@@ -7,6 +7,9 @@ edition.workspace = true
 name = "hyprdrive-daemon"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 hyprdrive-core = { path = "../../core" }
 hyprdrive-fs-indexer = { path = "../../crates/fs-indexer" }
