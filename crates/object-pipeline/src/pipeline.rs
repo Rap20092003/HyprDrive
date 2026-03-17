@@ -105,8 +105,7 @@ impl ObjectPipeline {
         let mut total_skipped = 0usize;
         let mut total_errors = 0usize;
 
-        let num_batches =
-            (working_entries.len() + self.config.batch_size - 1) / self.config.batch_size;
+        let num_batches = working_entries.len().div_ceil(self.config.batch_size);
         tracing::info!(
             entries = working_entries.len(),
             batches = num_batches,
