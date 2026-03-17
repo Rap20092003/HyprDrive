@@ -47,8 +47,7 @@ async fn pipeline_populates_objects_and_locations() {
         .unwrap();
 
     // Set up redb cache
-    let cache =
-        redb::Database::create(dir.path().join("cache.redb")).unwrap();
+    let cache = redb::Database::create(dir.path().join("cache.redb")).unwrap();
 
     // Create test files with known content
     let file_a = dir.path().join("alpha.txt");
@@ -72,7 +71,10 @@ async fn pipeline_populates_objects_and_locations() {
 
     // Verify stats
     assert_eq!(stats.total, 4);
-    assert_eq!(stats.hashed, 3, "all 3 files hashed (cache miss); same ObjectId for dups, DB upsert deduplicates");
+    assert_eq!(
+        stats.hashed, 3,
+        "all 3 files hashed (cache miss); same ObjectId for dups, DB upsert deduplicates"
+    );
     assert_eq!(stats.skipped, 0);
 
     // Verify DB: 3 objects (alpha, beta, subdir) — alpha and alpha_copy share one
@@ -91,8 +93,7 @@ async fn pipeline_populates_objects_and_locations() {
 
     // Verify idempotency: re-run should not create duplicates
     let config2 = hyprdrive_object_pipeline::PipelineConfig::new("test_vol".to_string());
-    let cache2 =
-        redb::Database::create(dir.path().join("cache2.redb")).unwrap();
+    let cache2 = redb::Database::create(dir.path().join("cache2.redb")).unwrap();
     let pipeline2 = hyprdrive_object_pipeline::ObjectPipeline::new(config2, pool.clone(), cache2);
     pipeline2.process_entries(&entries).await.unwrap();
 
@@ -129,8 +130,7 @@ async fn pipeline_empty_input_is_noop() {
     hyprdrive_core::db::pool::run_migrations(&pool)
         .await
         .unwrap();
-    let cache =
-        redb::Database::create(dir.path().join("cache.redb")).unwrap();
+    let cache = redb::Database::create(dir.path().join("cache.redb")).unwrap();
 
     let config = hyprdrive_object_pipeline::PipelineConfig::new("vol".to_string());
     let pipeline = hyprdrive_object_pipeline::ObjectPipeline::new(config, pool.clone(), cache);

@@ -15,9 +15,6 @@ use std::path::Path;
 pub fn full_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
     Err(FsIndexerError::UnsupportedPlatform {
         platform: "macOS".to_string(),
-        feature: format!(
-            "getattrlistbulk scanning for {}",
-            volume.display()
-        ),
+        feature: format!("getattrlistbulk scanning for {}", volume.display()),
     })
 }
