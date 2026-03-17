@@ -12,5 +12,8 @@ pub mod types;
 // Re-export key types
 pub use cache::{DirSizeRecord, ThumbRecord};
 pub use pool::{create_pool, run_migrations};
-pub use queries::{list_files_fast, search_files};
+pub use queries::{
+    count_locations_for_object, list_files_fast, search_files, upsert_location,
+    upsert_locations_batch, upsert_object, upsert_objects_batch,
+};
 pub use types::{DirSizeRow, FileRow, FileTypeRow, LocationRow, ObjectRow};

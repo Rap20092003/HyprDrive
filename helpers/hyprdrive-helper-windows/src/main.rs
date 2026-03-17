@@ -24,7 +24,7 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         println!("HyprDrive Windows Helper v{}", env!("CARGO_PKG_VERSION"));
-        // TODO Phase 3: MFT reader + named pipe IPC
+        // FIXME(phase-3): MFT reader + named pipe IPC for daemon communication
     }
 }
 

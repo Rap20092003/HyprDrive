@@ -77,6 +77,15 @@ pub enum FsIndexerError {
         fs_type: String,
     },
 
+    /// Platform not yet supported for this operation.
+    #[error("unsupported platform {platform}: {feature} not implemented")]
+    UnsupportedPlatform {
+        /// The platform name (e.g. "macOS").
+        platform: String,
+        /// Description of the missing feature.
+        feature: String,
+    },
+
     /// Generic I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),

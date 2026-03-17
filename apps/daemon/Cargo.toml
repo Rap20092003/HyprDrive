@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 hyprdrive-core = { path = "../../core" }
 hyprdrive-fs-indexer = { path = "../../crates/fs-indexer" }
+hyprdrive-object-pipeline = { path = "../../crates/object-pipeline" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -20,3 +21,7 @@ anyhow = { workspace = true }
 dirs = "6"
 sqlx = { workspace = true }
 redb = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+chrono = { workspace = true }

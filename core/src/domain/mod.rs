@@ -4,6 +4,7 @@
 //! These models define the "nouns" of the system.
 
 pub mod enums;
+pub mod events;
 pub mod filter;
 pub mod id;
 pub mod security;
@@ -16,6 +17,7 @@ pub mod virtual_folder;
 
 // Re-export top-level types for convenience.
 pub use enums::{FileCategory, ObjectKind, StorageTier, VolumeKind};
+pub use events::{ObjectIndexed, PipelineBatchComplete};
 pub use filter::{FilterExpr, SqlParam};
 pub use id::{DeviceId, LibraryId, LocationId, ObjectId, TagId, VirtualFolderId, VolumeId};
 pub use security::{CapabilityToken, RevocationList};

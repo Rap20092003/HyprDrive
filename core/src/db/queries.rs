@@ -116,6 +116,166 @@ pub async fn search_files(
     Ok(rows)
 }
 
+/// Upsert an object row (insert or update on conflict).
+///
+/// On conflict (same content hash), updates `updated_at` and `size_bytes`.
+#[tracing::instrument(skip(pool, row), fields(object_id = %row.id))]
+pub async fn upsert_object(
+    pool: &SqlitePool,
+    row: &crate::db::types::ObjectRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+           mime_type = COALESCE(excluded.mime_type, objects.mime_type),
+           size_bytes = excluded.size_bytes,
+           updated_at = excluded.updated_at",
+    )
+    .bind(&row.id)
+    .bind(&row.kind)
+    .bind(&row.mime_type)
+    .bind(row.size_bytes)
+    .bind(&row.created_at)
+    .bind(&row.updated_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Upsert a location row (insert or update on conflict).
+///
+/// On conflict (same volume_id + path), updates metadata fields.
+#[tracing::instrument(skip(pool, row), fields(location_id = %row.id, path = %row.path))]
+pub async fn upsert_location(
+    pool: &SqlitePool,
+    row: &crate::db::types::LocationRow,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
+                                is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(volume_id, path) DO UPDATE SET
+           object_id = excluded.object_id,
+           name = excluded.name,
+           extension = excluded.extension,
+           is_directory = excluded.is_directory,
+           size_bytes = excluded.size_bytes,
+           allocated_bytes = excluded.allocated_bytes,
+           modified_at = excluded.modified_at,
+           accessed_at = excluded.accessed_at",
+    )
+    .bind(&row.id)
+    .bind(&row.object_id)
+    .bind(&row.volume_id)
+    .bind(&row.path)
+    .bind(&row.name)
+    .bind(&row.extension)
+    .bind(&row.parent_id)
+    .bind(row.is_directory)
+    .bind(row.size_bytes)
+    .bind(row.allocated_bytes)
+    .bind(&row.created_at)
+    .bind(&row.modified_at)
+    .bind(&row.accessed_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Batch upsert objects in a single transaction.
+///
+/// Wraps all upserts in BEGIN...COMMIT for dramatically better throughput
+/// on 100k+ rows (SQLite WAL mode benefits from fewer fsyncs).
+#[tracing::instrument(skip(pool, rows), fields(count = rows.len()))]
+pub async fn upsert_objects_batch(
+    pool: &SqlitePool,
+    rows: &[crate::db::types::ObjectRow],
+) -> Result<(), sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+               mime_type = COALESCE(excluded.mime_type, objects.mime_type),
+               size_bytes = excluded.size_bytes,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&row.id)
+        .bind(&row.kind)
+        .bind(&row.mime_type)
+        .bind(row.size_bytes)
+        .bind(&row.created_at)
+        .bind(&row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Batch upsert locations in a single transaction.
+#[tracing::instrument(skip(pool, rows), fields(count = rows.len()))]
+pub async fn upsert_locations_batch(
+    pool: &SqlitePool,
+    rows: &[crate::db::types::LocationRow],
+) -> Result<(), sqlx::Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
+                                    is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(volume_id, path) DO UPDATE SET
+               object_id = excluded.object_id,
+               name = excluded.name,
+               extension = excluded.extension,
+               is_directory = excluded.is_directory,
+               size_bytes = excluded.size_bytes,
+               allocated_bytes = excluded.allocated_bytes,
+               modified_at = excluded.modified_at,
+               accessed_at = excluded.accessed_at",
+        )
+        .bind(&row.id)
+        .bind(&row.object_id)
+        .bind(&row.volume_id)
+        .bind(&row.path)
+        .bind(&row.name)
+        .bind(&row.extension)
+        .bind(&row.parent_id)
+        .bind(row.is_directory)
+        .bind(row.size_bytes)
+        .bind(row.allocated_bytes)
+        .bind(&row.created_at)
+        .bind(&row.modified_at)
+        .bind(&row.accessed_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Count how many locations reference a given object.
+#[tracing::instrument(skip(pool), fields(object_id))]
+pub async fn count_locations_for_object(
+    pool: &SqlitePool,
+    object_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations WHERE object_id = ?1")
+        .bind(object_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +455,181 @@ mod tests {
         let results = search_files(&pool, "readme", 10).await.expect("search");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "readme.md");
+    }
+
+    // ═══ Upsert Tests ═══
+
+    fn make_object_row(id: &str, kind: &str, size: i64) -> crate::db::types::ObjectRow {
+        crate::db::types::ObjectRow {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            mime_type: None,
+            size_bytes: size,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    fn make_location_row(
+        id: &str,
+        object_id: &str,
+        volume_id: &str,
+        path: &str,
+        name: &str,
+    ) -> crate::db::types::LocationRow {
+        crate::db::types::LocationRow {
+            id: id.to_string(),
+            object_id: object_id.to_string(),
+            volume_id: volume_id.to_string(),
+            path: path.to_string(),
+            name: name.to_string(),
+            extension: None,
+            parent_id: None,
+            is_directory: false,
+            size_bytes: 1024,
+            allocated_bytes: 4096,
+            created_at: "2026-01-01 00:00:00".to_string(),
+            modified_at: "2026-01-01 00:00:00".to_string(),
+            accessed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_object_insert_new() {
+        let (pool, _dir) = setup().await;
+        let row = make_object_row("obj_new", "File", 1024);
+        upsert_object(&pool, &row).await.expect("upsert");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects WHERE id = 'obj_new'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_object_idempotent() {
+        let (pool, _dir) = setup().await;
+        let row = make_object_row("obj_idem", "File", 1024);
+        upsert_object(&pool, &row).await.expect("first");
+        upsert_object(&pool, &row).await.expect("second");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects WHERE id = 'obj_idem'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_object_updates_metadata() {
+        let (pool, _dir) = setup().await;
+        let mut row = make_object_row("obj_upd", "File", 1024);
+        upsert_object(&pool, &row).await.expect("insert");
+
+        row.size_bytes = 2048;
+        row.mime_type = Some("text/plain".to_string());
+        row.updated_at = "2026-06-01 00:00:00".to_string();
+        upsert_object(&pool, &row).await.expect("update");
+
+        let (size, mime): (i64, Option<String>) =
+            sqlx::query_as("SELECT size_bytes, mime_type FROM objects WHERE id = 'obj_upd'")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch");
+        assert_eq!(size, 2048);
+        assert_eq!(mime.as_deref(), Some("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn test_upsert_location_insert_new() {
+        let (pool, _dir) = setup().await;
+        let obj = make_object_row("obj_loc", "File", 100);
+        upsert_object(&pool, &obj).await.expect("obj");
+
+        let loc = make_location_row("loc1", "obj_loc", "vol1", "/a/b.txt", "b.txt");
+        upsert_location(&pool, &loc).await.expect("loc");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations WHERE id = 'loc1'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_location_idempotent() {
+        let (pool, _dir) = setup().await;
+        let obj = make_object_row("obj_li", "File", 100);
+        upsert_object(&pool, &obj).await.expect("obj");
+
+        let loc = make_location_row("loc_i", "obj_li", "vol1", "/x.txt", "x.txt");
+        upsert_location(&pool, &loc).await.expect("first");
+        upsert_location(&pool, &loc).await.expect("second");
+
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM locations WHERE volume_id = 'vol1' AND path = '/x.txt'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_count_locations_for_object() {
+        let (pool, _dir) = setup().await;
+        let obj = make_object_row("obj_dup", "File", 100);
+        upsert_object(&pool, &obj).await.expect("obj");
+
+        let loc1 = make_location_row("loc_a", "obj_dup", "vol1", "/a.txt", "a.txt");
+        let loc2 = make_location_row("loc_b", "obj_dup", "vol1", "/b.txt", "b.txt");
+        upsert_location(&pool, &loc1).await.expect("loc1");
+        upsert_location(&pool, &loc2).await.expect("loc2");
+
+        let count = count_locations_for_object(&pool, "obj_dup")
+            .await
+            .expect("count");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_objects_batch_empty() {
+        let (pool, _dir) = setup().await;
+        upsert_objects_batch(&pool, &[]).await.expect("empty batch");
+    }
+
+    #[tokio::test]
+    async fn test_upsert_objects_batch_multiple() {
+        let (pool, _dir) = setup().await;
+        let rows = vec![
+            make_object_row("batch_1", "File", 100),
+            make_object_row("batch_2", "File", 200),
+            make_object_row("batch_3", "Directory", 0),
+        ];
+        upsert_objects_batch(&pool, &rows).await.expect("batch");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 3);
+    }
+
+    #[tokio::test]
+    async fn test_upsert_objects_batch_idempotent() {
+        let (pool, _dir) = setup().await;
+        let rows = vec![
+            make_object_row("bi_1", "File", 100),
+            make_object_row("bi_2", "File", 200),
+        ];
+        upsert_objects_batch(&pool, &rows).await.expect("first");
+        upsert_objects_batch(&pool, &rows).await.expect("second");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 2);
     }
 }

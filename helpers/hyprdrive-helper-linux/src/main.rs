@@ -23,7 +23,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         println!("HyprDrive Linux Helper v{}", env!("CARGO_PKG_VERSION"));
-        // TODO Phase 5: fanotify + io_uring
+        // FIXME(phase-8): fanotify + io_uring for high-performance scanning
     }
 }
 

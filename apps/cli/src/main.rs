@@ -17,10 +17,10 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     println!("HyprDrive CLI v{}", env!("CARGO_PKG_VERSION"));
-    println!("TODO: Connect to daemon socket at :7420");
+    println!("Not yet connected — daemon socket support is Phase 13");
 
-    // TODO Phase 13: Connect to daemon via Unix socket / named pipe
-    // TODO: Parse CLI args (clap)
+    // FIXME(phase-13): connect to daemon via Unix socket / named pipe
+    // FIXME(phase-13): parse CLI args with clap
 
     Ok(())
 }
