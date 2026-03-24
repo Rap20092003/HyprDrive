@@ -4,7 +4,7 @@
 //! to list files in a directory in < 5ms at 100k files.
 
 use crate::db::types::FileRow;
-use sqlx::SqlitePool;
+use sqlx::{Acquire, SqlitePool};
 
 /// List files in a directory using keyset (cursor) pagination.
 ///
@@ -221,6 +221,10 @@ pub async fn upsert_objects_batch(
 }
 
 /// Batch upsert locations in a single transaction.
+///
+/// Temporarily disables foreign key checks on a dedicated connection to avoid
+/// FK violations when parent directories haven't been inserted yet (MFT order
+/// is arbitrary and entries span multiple batches).
 #[tracing::instrument(skip(pool, rows), fields(count = rows.len()))]
 pub async fn upsert_locations_batch(
     pool: &SqlitePool,
@@ -229,12 +233,14 @@ pub async fn upsert_locations_batch(
     if rows.is_empty() {
         return Ok(());
     }
-    let mut tx = pool.begin().await?;
-    // Defer FK checks until COMMIT so rows within the same batch can
-    // reference each other (e.g. parent directories inserted after children).
-    sqlx::query("PRAGMA defer_foreign_keys = ON")
-        .execute(&mut *tx)
+    // Acquire a dedicated connection so we can toggle PRAGMA foreign_keys
+    // without affecting other pool users. The pragma cannot be changed
+    // inside a transaction, so we set it before BEGIN.
+    let mut conn = pool.acquire().await?;
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *conn)
         .await?;
+    let mut tx = conn.begin().await?;
     for row in rows {
         sqlx::query(
             "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
@@ -269,6 +275,10 @@ pub async fn upsert_locations_batch(
         .await?;
     }
     tx.commit().await?;
+    // Re-enable FK checks on this connection before returning it to the pool.
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
