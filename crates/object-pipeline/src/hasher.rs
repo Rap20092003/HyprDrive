@@ -159,7 +159,7 @@ pub fn hash_entries_batch(
                 Err(e) => {
                     // Check if it's a permission error or missing file.
                     let err_str = e.to_string();
-                    tracing::warn!(
+                    tracing::trace!(
                         path = %entry.full_path.display(),
                         error = %err_str,
                         "skipping file"

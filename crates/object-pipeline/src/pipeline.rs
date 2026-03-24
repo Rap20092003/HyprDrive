@@ -147,6 +147,7 @@ impl ObjectPipeline {
         );
 
         for (batch_idx, chunk) in working_entries.chunks(self.config.batch_size).enumerate() {
+            let batch_start = Instant::now();
             tracing::info!(
                 batch = batch_idx + 1,
                 of = num_batches,
@@ -247,6 +248,16 @@ impl ObjectPipeline {
             queries::upsert_locations_batch(&self.pool, &location_rows)
                 .await
                 .map_err(crate::error::PipelineError::Database)?;
+
+            tracing::info!(
+                batch = batch_idx + 1,
+                of = num_batches,
+                hashed = hash_result.hashed,
+                cached = hash_result.cache_hits,
+                skipped = hash_result.skipped,
+                elapsed_ms = batch_start.elapsed().as_millis() as u64,
+                "batch complete"
+            );
         }
 
         let stats = PipelineBatchComplete {
