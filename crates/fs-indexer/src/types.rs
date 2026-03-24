@@ -138,6 +138,47 @@ pub struct LinuxCursor {
     pub fanotify_active: bool,
 }
 
+/// Platform-agnostic trait for persisting watcher cursors across restarts.
+///
+/// Each platform serializes its own cursor type (e.g. `UsnCursor`, `LinuxCursor`)
+/// to JSON before storing. This keeps the trait cross-platform while the storage
+/// backend (SQLite, file, etc.) remains cursor-type-agnostic.
+pub trait CursorStore: Send + Sync + 'static {
+    /// Save a cursor as a JSON string for a volume key (e.g. "C" on Windows, "/dev/sda1" on Linux).
+    fn save(
+        &self,
+        volume_key: &str,
+        cursor_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Load a cursor JSON string for a volume key. Returns None if not found.
+    fn load(
+        &self,
+        volume_key: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// A no-op cursor store that doesn't persist anything.
+/// Useful for testing or when persistence isn't needed.
+#[derive(Debug, Clone)]
+pub struct NoCursorStore;
+
+impl CursorStore for NoCursorStore {
+    fn save(
+        &self,
+        _volume_key: &str,
+        _cursor_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+    fn load(
+        &self,
+        _volume_key: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(None)
+    }
+}
+
 /// Volume scan result combining entries with cursor state.
 #[derive(Debug)]
 pub struct ScanResult {

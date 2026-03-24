@@ -29,7 +29,8 @@ pub mod types;
 // Re-export key types at crate root
 pub use error::{FsIndexerError, FsIndexerResult};
 pub use types::{
-    FilesystemKind, FsChange, IndexEntry, LinuxCursor, ScanResult, TopoEntry, UsnCursor,
+    CursorStore, FilesystemKind, FsChange, IndexEntry, LinuxCursor, NoCursorStore, ScanResult,
+    TopoEntry, UsnCursor,
 };
 
 // Re-export platform-specific scanner functions
@@ -43,7 +44,7 @@ pub use platform::windows::detect::detect_filesystem;
 pub use platform::windows::usn::{poll_changes, read_cursor};
 
 #[cfg(target_os = "windows")]
-pub use platform::windows::listener::{CursorStore, ListenerConfig, NoCursorStore, UsnListener};
+pub use platform::windows::listener::{ListenerConfig, UsnListener};
 
 // Linux platform re-exports
 #[cfg(target_os = "linux")]

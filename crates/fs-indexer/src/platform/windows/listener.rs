@@ -8,51 +8,13 @@
 //! listener does not depend on a specific storage backend.
 
 use crate::error::FsIndexerResult;
-use crate::types::{FsChange, UsnCursor};
+use crate::types::{CursorStore, FsChange, UsnCursor};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
-/// Trait for persisting USN journal cursors across restarts.
-///
-/// Implement this to plug in your storage backend (e.g. redb, file, etc.).
-pub trait CursorStore: Send + Sync + 'static {
-    /// Save a cursor for a volume key (e.g. "C").
-    fn save(
-        &self,
-        volume_key: &str,
-        cursor: &UsnCursor,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-    /// Load a cursor for a volume key. Returns None if not found.
-    fn load(
-        &self,
-        volume_key: &str,
-    ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>>;
-}
-
-/// A no-op cursor store that doesn't persist anything.
-/// Useful for testing or when persistence isn't needed.
-#[derive(Debug, Clone)]
-pub struct NoCursorStore;
-
-impl CursorStore for NoCursorStore {
-    fn save(
-        &self,
-        _volume_key: &str,
-        _cursor: &UsnCursor,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
-    fn load(
-        &self,
-        _volume_key: &str,
-    ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(None)
-    }
-}
 
 /// Configuration for the USN journal listener.
 #[derive(Debug, Clone)]
@@ -165,6 +127,27 @@ impl UsnListener {
     }
 }
 
+/// Save a `UsnCursor` to the store as JSON.
+fn save_cursor<S: CursorStore>(
+    store: &S,
+    vkey: &str,
+    cursor: &UsnCursor,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let json = serde_json::to_string(cursor)?;
+    store.save(vkey, &json)
+}
+
+/// Load a `UsnCursor` from the store (deserializing from JSON).
+fn load_cursor<S: CursorStore>(
+    store: &S,
+    vkey: &str,
+) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
+    match store.load(vkey)? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
 /// Extract drive letter from a volume path for use as cursor store key.
 fn volume_key(volume: &std::path::Path) -> String {
     let s = volume.to_string_lossy();
@@ -188,7 +171,7 @@ fn poll_loop<S: CursorStore>(
     let _span = tracing::info_span!("usn_listener", volume = %vkey).entered();
 
     // Load cursor from store, or read a fresh one
-    let mut cursor = match store.load(&vkey) {
+    let mut cursor = match load_cursor(store.as_ref(), &vkey) {
         Ok(Some(c)) => {
             tracing::info!(
                 journal_id = c.journal_id,
@@ -223,7 +206,7 @@ fn poll_loop<S: CursorStore>(
         // Check for shutdown
         if cancel.is_cancelled() {
             tracing::info!("Shutdown signal received, persisting final cursor");
-            if let Err(e) = store.save(&vkey, &cursor) {
+            if let Err(e) = save_cursor(store.as_ref(), &vkey, &cursor) {
                 tracing::error!(error = %e, "Failed to persist final cursor");
             }
             return;
@@ -267,7 +250,7 @@ fn poll_loop<S: CursorStore>(
                 cursor = new_cursor;
 
                 // Persist cursor after each batch
-                if let Err(e) = store.save(&vkey, &cursor) {
+                if let Err(e) = save_cursor(store.as_ref(), &vkey, &cursor) {
                     tracing::warn!(error = %e, "Failed to persist cursor (will retry)");
                 }
             }
@@ -368,18 +351,19 @@ mod tests {
 
     #[test]
     fn no_cursor_store_works() {
+        use crate::types::NoCursorStore;
         let store = NoCursorStore;
         let cursor = UsnCursor {
             journal_id: 42,
             next_usn: 100,
         };
-        store.save("C", &cursor).unwrap();
-        assert_eq!(store.load("C").unwrap(), None);
+        save_cursor(&store, "C", &cursor).unwrap();
+        assert_eq!(load_cursor(&store, "C").unwrap(), None);
     }
 
-    /// In-memory cursor store for testing. Stores cursors in a HashMap.
+    /// In-memory cursor store for testing. Stores cursors as JSON strings in a HashMap.
     struct InMemoryCursorStore {
-        data: std::sync::Mutex<std::collections::HashMap<String, UsnCursor>>,
+        data: std::sync::Mutex<std::collections::HashMap<String, String>>,
     }
 
     impl InMemoryCursorStore {
@@ -394,19 +378,19 @@ mod tests {
         fn save(
             &self,
             volume_key: &str,
-            cursor: &UsnCursor,
+            cursor_json: &str,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.data
                 .lock()
                 .unwrap()
-                .insert(volume_key.to_string(), cursor.clone());
+                .insert(volume_key.to_string(), cursor_json.to_string());
             Ok(())
         }
 
         fn load(
             &self,
             volume_key: &str,
-        ) -> Result<Option<UsnCursor>, Box<dyn std::error::Error + Send + Sync>> {
+        ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
             Ok(self.data.lock().unwrap().get(volume_key).cloned())
         }
     }
@@ -418,39 +402,39 @@ mod tests {
             journal_id: 42,
             next_usn: 100,
         };
-        store.save("C", &cursor).unwrap();
-        let loaded = store.load("C").unwrap();
+        save_cursor(&store, "C", &cursor).unwrap();
+        let loaded = load_cursor(&store, "C").unwrap();
         assert_eq!(loaded, Some(cursor));
     }
 
     #[test]
     fn in_memory_cursor_store_miss() {
         let store = InMemoryCursorStore::new();
-        assert_eq!(store.load("Z").unwrap(), None);
+        assert_eq!(load_cursor(&store, "Z").unwrap(), None);
     }
 
     #[test]
     fn in_memory_cursor_store_overwrite() {
         let store = InMemoryCursorStore::new();
-        store
-            .save(
-                "C",
-                &UsnCursor {
-                    journal_id: 1,
-                    next_usn: 10,
-                },
-            )
-            .unwrap();
-        store
-            .save(
-                "C",
-                &UsnCursor {
-                    journal_id: 1,
-                    next_usn: 50,
-                },
-            )
-            .unwrap();
-        let loaded = store.load("C").unwrap().unwrap();
+        save_cursor(
+            &store,
+            "C",
+            &UsnCursor {
+                journal_id: 1,
+                next_usn: 10,
+            },
+        )
+        .unwrap();
+        save_cursor(
+            &store,
+            "C",
+            &UsnCursor {
+                journal_id: 1,
+                next_usn: 50,
+            },
+        )
+        .unwrap();
+        let loaded = load_cursor(&store, "C").unwrap().unwrap();
         assert_eq!(loaded.next_usn, 50);
     }
 
@@ -459,7 +443,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn listener_start_and_shutdown() {
-        let store = Arc::new(NoCursorStore);
+        let store = Arc::new(crate::NoCursorStore);
 
         let config = ListenerConfig::default()
             .with_poll_interval(Duration::from_millis(50))

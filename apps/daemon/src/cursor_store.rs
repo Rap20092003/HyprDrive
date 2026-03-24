@@ -1,17 +1,19 @@
-//! SQLite-backed cursor store for persisting USN journal positions.
+//! SQLite-backed cursor store for persisting watcher cursors across restarts.
 //!
 //! Bridges the sync `CursorStore` trait (called from `spawn_blocking` poll loop)
 //! to async SQLite queries via `Handle::current().block_on()`.
+//!
+//! This is platform-agnostic — each platform serializes its own cursor type
+//! (e.g. `UsnCursor`, `LinuxCursor`) to JSON before calling `save`.
 
 use hyprdrive_core::db::queries;
-use hyprdrive_fs_indexer::{CursorStore, UsnCursor};
+use hyprdrive_fs_indexer::CursorStore;
 use sqlx::SqlitePool;
-use std::error::Error;
 use tokio::runtime::Handle;
 
 /// A `CursorStore` implementation backed by SQLite.
 ///
-/// The USN listener's `poll_loop` runs inside `spawn_blocking`, so it calls
+/// The watcher's `poll_loop` runs inside `spawn_blocking`, so it calls
 /// sync methods. We bridge to async SQLite via `Handle::current().block_on()`.
 pub struct SqliteCursorStore {
     pool: SqlitePool,
@@ -27,19 +29,18 @@ impl CursorStore for SqliteCursorStore {
     fn save(
         &self,
         volume_key: &str,
-        cursor: &UsnCursor,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let json = serde_json::to_string(cursor)?;
-        Handle::current().block_on(queries::save_cursor(&self.pool, volume_key, &json))?;
+        cursor_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Handle::current().block_on(queries::save_cursor(&self.pool, volume_key, cursor_json))?;
         Ok(())
     }
 
-    fn load(&self, volume_key: &str) -> Result<Option<UsnCursor>, Box<dyn Error + Send + Sync>> {
+    fn load(
+        &self,
+        volume_key: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
         let json = Handle::current().block_on(queries::load_cursor(&self.pool, volume_key))?;
-        match json {
-            Some(j) => Ok(Some(serde_json::from_str(&j)?)),
-            None => Ok(None),
-        }
+        Ok(json)
     }
 }
 
@@ -65,13 +66,10 @@ mod tests {
         let store = std::sync::Arc::new(SqliteCursorStore::new(pool));
         let s = store.clone();
         tokio::task::spawn_blocking(move || {
-            let cursor = UsnCursor {
-                journal_id: 42,
-                next_usn: 12345,
-            };
-            s.save("C", &cursor).expect("save");
+            let json = r#"{"journal_id":42,"next_usn":12345}"#;
+            s.save("C", json).expect("save");
             let loaded = s.load("C").expect("load");
-            assert_eq!(loaded, Some(cursor));
+            assert_eq!(loaded, Some(json.to_string()));
         })
         .await
         .expect("spawn_blocking");
@@ -83,18 +81,15 @@ mod tests {
         let store = std::sync::Arc::new(SqliteCursorStore::new(pool));
         let s = store.clone();
         tokio::task::spawn_blocking(move || {
-            let c1 = UsnCursor {
-                journal_id: 1,
-                next_usn: 100,
-            };
-            let c2 = UsnCursor {
-                journal_id: 1,
-                next_usn: 999,
-            };
-            s.save("D", &c1).expect("save1");
-            s.save("D", &c2).expect("save2");
+            s.save("D", r#"{"journal_id":1,"next_usn":100}"#)
+                .expect("save1");
+            s.save("D", r#"{"journal_id":1,"next_usn":999}"#)
+                .expect("save2");
             let loaded = s.load("D").expect("load");
-            assert_eq!(loaded, Some(c2));
+            assert_eq!(
+                loaded,
+                Some(r#"{"journal_id":1,"next_usn":999}"#.to_string())
+            );
         })
         .await
         .expect("spawn_blocking");

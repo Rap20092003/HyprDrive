@@ -12,7 +12,6 @@
     missing_docs
 )]
 
-#[cfg(target_os = "windows")]
 mod cursor_store;
 mod watcher;
 
@@ -137,10 +136,11 @@ async fn main() -> Result<()> {
                         // Pre-seed is best-effort (save within spawn_blocking since we're in async).
                         let store = Arc::clone(&cursor_store);
                         let vol = volume_id.clone();
-                        let cursor = c.clone();
+                        let cursor_json =
+                            serde_json::to_string(c).expect("UsnCursor serialization cannot fail");
                         if let Err(e) = tokio::task::spawn_blocking(move || {
                             use hyprdrive_fs_indexer::CursorStore;
-                            store.save(&vol, &cursor)
+                            store.save(&vol, &cursor_json)
                         })
                         .await?
                         {
