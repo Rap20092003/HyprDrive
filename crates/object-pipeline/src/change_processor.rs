@@ -390,7 +390,8 @@ mod tests {
         processor.seed_fid_map(&[parent]);
 
         let resolved = processor.resolve_path(10, OsStr::new("readme.md"));
-        assert_eq!(resolved, Some(PathBuf::from("C:\\docs\\readme.md")));
+        let expected = PathBuf::from("C:\\docs").join("readme.md");
+        assert_eq!(resolved, Some(expected));
 
         // Missing parent returns None.
         let missing = processor.resolve_path(999, OsStr::new("nope.txt"));
