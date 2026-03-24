@@ -109,11 +109,16 @@ impl ObjectPipeline {
         }
 
         // Filter directories if configured.
-        let working_entries: Vec<&IndexEntry> = if self.config.skip_directories {
+        let mut working_entries: Vec<&IndexEntry> = if self.config.skip_directories {
             entries.iter().filter(|e| !e.is_dir).collect()
         } else {
             entries.iter().collect()
         };
+
+        // Sort by path depth so parent directories are inserted before children.
+        // This prevents FK violations on locations.parent_id when entries span
+        // multiple batches (MFT order is arbitrary, not tree-order).
+        working_entries.sort_by_key(|e| e.full_path.components().count());
 
         // Build fid → LocationId map for parent_id resolution.
         // This maps each entry's fid to the deterministic LocationId so we can
