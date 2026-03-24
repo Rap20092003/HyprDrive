@@ -53,6 +53,8 @@ pub struct LocationRow {
     pub modified_at: String,
     /// Last accessed timestamp
     pub accessed_at: Option<String>,
+    /// File reference number (NTFS FRN / inode) for O(1) change event lookups.
+    pub fid: Option<i64>,
 }
 
 /// COMPUTED file type — assembled from JOINs.

@@ -13,7 +13,8 @@ pub mod types;
 pub use cache::{DirSizeRecord, ThumbRecord};
 pub use pool::{create_pool, run_migrations};
 pub use queries::{
-    count_locations_for_object, list_files_fast, search_files, upsert_location,
-    upsert_locations_batch, upsert_object, upsert_objects_batch,
+    count_locations_for_object, delete_location_by_fid, delete_location_by_path,
+    delete_orphan_objects, list_files_fast, load_cursor, relocate_location, save_cursor,
+    search_files, upsert_location, upsert_locations_batch, upsert_object, upsert_objects_batch,
 };
 pub use types::{DirSizeRow, FileRow, FileTypeRow, LocationRow, ObjectRow};

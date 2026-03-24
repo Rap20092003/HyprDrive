@@ -153,8 +153,8 @@ pub async fn upsert_location(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
-                                is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at, fid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(volume_id, path) DO UPDATE SET
            object_id = excluded.object_id,
            name = excluded.name,
@@ -163,7 +163,8 @@ pub async fn upsert_location(
            size_bytes = excluded.size_bytes,
            allocated_bytes = excluded.allocated_bytes,
            modified_at = excluded.modified_at,
-           accessed_at = excluded.accessed_at",
+           accessed_at = excluded.accessed_at,
+           fid = excluded.fid",
     )
     .bind(&row.id)
     .bind(&row.object_id)
@@ -178,6 +179,7 @@ pub async fn upsert_location(
     .bind(&row.created_at)
     .bind(&row.modified_at)
     .bind(&row.accessed_at)
+    .bind(row.fid)
     .execute(pool)
     .await?;
     Ok(())
@@ -231,8 +233,8 @@ pub async fn upsert_locations_batch(
     for row in rows {
         sqlx::query(
             "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
-                                    is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                    is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at, fid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(volume_id, path) DO UPDATE SET
                object_id = excluded.object_id,
                name = excluded.name,
@@ -241,7 +243,8 @@ pub async fn upsert_locations_batch(
                size_bytes = excluded.size_bytes,
                allocated_bytes = excluded.allocated_bytes,
                modified_at = excluded.modified_at,
-               accessed_at = excluded.accessed_at",
+               accessed_at = excluded.accessed_at,
+               fid = excluded.fid",
         )
         .bind(&row.id)
         .bind(&row.object_id)
@@ -256,6 +259,7 @@ pub async fn upsert_locations_batch(
         .bind(&row.created_at)
         .bind(&row.modified_at)
         .bind(&row.accessed_at)
+        .bind(row.fid)
         .execute(&mut *tx)
         .await?;
     }
@@ -276,7 +280,210 @@ pub async fn count_locations_for_object(
     Ok(count)
 }
 
+// ═══ Sub-phase 8.3: Cursor store queries ═══
+
+/// Save (upsert) a watcher cursor for a volume.
+#[tracing::instrument(skip(pool, cursor_json), fields(volume_key))]
+pub async fn save_cursor(
+    pool: &SqlitePool,
+    volume_key: &str,
+    cursor_json: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO cursor_store (volume_key, cursor_json, updated_at)
+         VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(volume_key) DO UPDATE SET
+           cursor_json = excluded.cursor_json,
+           updated_at = excluded.updated_at",
+    )
+    .bind(volume_key)
+    .bind(cursor_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load a watcher cursor for a volume. Returns None if not found.
+#[tracing::instrument(skip(pool), fields(volume_key))]
+pub async fn load_cursor(
+    pool: &SqlitePool,
+    volume_key: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT cursor_json FROM cursor_store WHERE volume_key = ?1")
+            .bind(volume_key)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.0))
+}
+
+// ═══ Sub-phase 8.4: Delete & orphan cleanup queries ═══
+
+/// Delete a location by (volume_id, fid). Returns the object_id of the deleted row.
+#[tracing::instrument(skip(pool), fields(volume_id, fid))]
+pub async fn delete_location_by_fid(
+    pool: &SqlitePool,
+    volume_id: &str,
+    fid: i64,
+) -> Result<Option<String>, sqlx::Error> {
+    // Atomic SELECT+DELETE in a transaction (avoids RETURNING clause compatibility issues).
+    let mut tx = pool.begin().await?;
+
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT object_id FROM locations WHERE volume_id = ?1 AND fid = ?2")
+            .bind(volume_id)
+            .bind(fid)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    if let Some(ref r) = row {
+        sqlx::query("DELETE FROM locations WHERE volume_id = ?1 AND fid = ?2")
+            .bind(volume_id)
+            .bind(fid)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(r.0.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Delete a location by (volume_id, path). Fallback when fid is unavailable.
+#[tracing::instrument(skip(pool), fields(volume_id, path))]
+pub async fn delete_location_by_path(
+    pool: &SqlitePool,
+    volume_id: &str,
+    path: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    // Atomic SELECT+DELETE in a transaction.
+    let mut tx = pool.begin().await?;
+
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT object_id FROM locations WHERE volume_id = ?1 AND path = ?2")
+            .bind(volume_id)
+            .bind(path)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    if let Some(ref r) = row {
+        sqlx::query("DELETE FROM locations WHERE volume_id = ?1 AND path = ?2")
+            .bind(volume_id)
+            .bind(path)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(r.0.clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Delete objects that have zero remaining locations. Returns count deleted.
+#[tracing::instrument(skip(pool), fields(candidate_count = object_ids.len()))]
+pub async fn delete_orphan_objects(
+    pool: &SqlitePool,
+    object_ids: &[String],
+) -> Result<u64, sqlx::Error> {
+    if object_ids.is_empty() {
+        return Ok(0);
+    }
+    // Build a single DELETE with dynamic IN (...) and NOT EXISTS subquery.
+    let placeholders: Vec<String> = (1..=object_ids.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!(
+        "DELETE FROM objects WHERE id IN ({}) AND NOT EXISTS (SELECT 1 FROM locations WHERE locations.object_id = objects.id)",
+        placeholders.join(", ")
+    );
+    let mut query = sqlx::query(&sql);
+    for oid in object_ids {
+        query = query.bind(oid);
+    }
+    let result = query.execute(pool).await?;
+    Ok(result.rows_affected())
+}
+
+// ═══ Sub-phase 8.5: Move/rename query ═══
+
+/// Snapshot of location metadata preserved across relocations.
+#[derive(sqlx::FromRow)]
+struct ExistingLocation {
+    object_id: String,
+    is_directory: bool,
+    size_bytes: i64,
+    allocated_bytes: i64,
+    created_at: String,
+    modified_at: String,
+    accessed_at: Option<String>,
+}
+
+/// Move a location to a new path. Deletes old row, inserts new with updated path/name/id.
+/// Preserves object_id and other metadata. Returns true if a row was moved.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip(pool), fields(volume_id, fid, new_path))]
+pub async fn relocate_location(
+    pool: &SqlitePool,
+    volume_id: &str,
+    fid: i64,
+    new_location_id: &str,
+    new_path: &str,
+    new_name: &str,
+    new_extension: Option<&str>,
+    new_parent_id: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    // All operations in a single transaction to avoid TOCTOU.
+    let mut tx = pool.begin().await?;
+
+    // Fetch existing row by (volume_id, fid)
+    let existing: Option<ExistingLocation> = sqlx::query_as(
+        "SELECT object_id, is_directory, size_bytes, allocated_bytes,
+                created_at, modified_at, accessed_at
+         FROM locations WHERE volume_id = ?1 AND fid = ?2",
+    )
+    .bind(volume_id)
+    .bind(fid)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = existing else {
+        return Ok(false);
+    };
+
+    // Delete old location
+    sqlx::query("DELETE FROM locations WHERE volume_id = ?1 AND fid = ?2")
+        .bind(volume_id)
+        .bind(fid)
+        .execute(&mut *tx)
+        .await?;
+
+    // Insert new location preserving metadata
+    sqlx::query(
+        "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
+                                is_directory, size_bytes, allocated_bytes, created_at, modified_at, accessed_at, fid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+    )
+    .bind(new_location_id)
+    .bind(&row.object_id)
+    .bind(volume_id)
+    .bind(new_path)
+    .bind(new_name)
+    .bind(new_extension)
+    .bind(new_parent_id)
+    .bind(row.is_directory)
+    .bind(row.size_bytes)
+    .bind(row.allocated_bytes)
+    .bind(&row.created_at)
+    .bind(&row.modified_at)
+    .bind(&row.accessed_at)
+    .bind(fid)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::db::pool::{create_pool, run_migrations};
@@ -491,6 +698,7 @@ mod tests {
             created_at: "2026-01-01 00:00:00".to_string(),
             modified_at: "2026-01-01 00:00:00".to_string(),
             accessed_at: None,
+            fid: None,
         }
     }
 
@@ -631,5 +839,273 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count.0, 2);
+    }
+
+    // ═══ Sub-phase 8.1: fid upsert test ═══
+
+    #[tokio::test]
+    async fn test_upsert_location_with_fid() {
+        let (pool, _dir) = setup().await;
+        let obj = make_object_row("obj_fid", "File", 100);
+        upsert_object(&pool, &obj).await.expect("obj");
+
+        let mut loc = make_location_row("loc_fid", "obj_fid", "vol1", "/fid.txt", "fid.txt");
+        loc.fid = Some(12345);
+        upsert_location(&pool, &loc).await.expect("loc");
+
+        let row: (Option<i64>,) = sqlx::query_as("SELECT fid FROM locations WHERE id = 'loc_fid'")
+            .fetch_one(&pool)
+            .await
+            .expect("fid");
+        assert_eq!(row.0, Some(12345));
+    }
+
+    // ═══ Sub-phase 8.3: Cursor store query tests ═══
+
+    #[tokio::test]
+    async fn test_save_and_load_cursor() {
+        let (pool, _dir) = setup().await;
+        save_cursor(&pool, "vol_C", r#"{"usn":42}"#)
+            .await
+            .expect("save");
+        let loaded = load_cursor(&pool, "vol_C").await.expect("load");
+        assert_eq!(loaded.as_deref(), Some(r#"{"usn":42}"#));
+    }
+
+    #[tokio::test]
+    async fn test_load_cursor_missing() {
+        let (pool, _dir) = setup().await;
+        let loaded = load_cursor(&pool, "nonexistent").await.expect("load");
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_cursor_overwrites() {
+        let (pool, _dir) = setup().await;
+        save_cursor(&pool, "vol_D", r#"{"usn":1}"#)
+            .await
+            .expect("save1");
+        save_cursor(&pool, "vol_D", r#"{"usn":99}"#)
+            .await
+            .expect("save2");
+        let loaded = load_cursor(&pool, "vol_D").await.expect("load");
+        assert_eq!(loaded.as_deref(), Some(r#"{"usn":99}"#));
+    }
+
+    // ═══ Sub-phase 8.4: Delete & orphan cleanup tests ═══
+
+    /// Helper: insert an object + location with fid.
+    async fn insert_object_with_fid_location(
+        pool: &SqlitePool,
+        obj_id: &str,
+        loc_id: &str,
+        vol: &str,
+        path: &str,
+        name: &str,
+        fid: i64,
+    ) {
+        let obj = make_object_row(obj_id, "File", 1024);
+        upsert_object(pool, &obj).await.expect("obj");
+        let mut loc = make_location_row(loc_id, obj_id, vol, path, name);
+        loc.fid = Some(fid);
+        upsert_location(pool, &loc).await.expect("loc");
+    }
+
+    #[tokio::test]
+    async fn test_delete_location_by_fid() {
+        let (pool, _dir) = setup().await;
+        insert_object_with_fid_location(
+            &pool, "obj_d1", "loc_d1", "vol1", "/d1.txt", "d1.txt", 100,
+        )
+        .await;
+
+        let result = delete_location_by_fid(&pool, "vol1", 100)
+            .await
+            .expect("delete");
+        assert_eq!(result.as_deref(), Some("obj_d1"));
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations WHERE id = 'loc_d1'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_location_by_fid_nonexistent() {
+        let (pool, _dir) = setup().await;
+        let result = delete_location_by_fid(&pool, "vol1", 99999)
+            .await
+            .expect("delete");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_location_by_path() {
+        let (pool, _dir) = setup().await;
+        insert_object_with_fid_location(
+            &pool, "obj_dp", "loc_dp", "vol1", "/dp.txt", "dp.txt", 200,
+        )
+        .await;
+
+        let result = delete_location_by_path(&pool, "vol1", "/dp.txt")
+            .await
+            .expect("delete");
+        assert_eq!(result.as_deref(), Some("obj_dp"));
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations WHERE id = 'loc_dp'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_orphan_objects_removes_unreferenced() {
+        let (pool, _dir) = setup().await;
+        insert_object_with_fid_location(
+            &pool,
+            "obj_orph",
+            "loc_orph",
+            "vol1",
+            "/orph.txt",
+            "orph.txt",
+            300,
+        )
+        .await;
+
+        // Delete the location, leaving the object orphaned
+        delete_location_by_fid(&pool, "vol1", 300)
+            .await
+            .expect("delete loc");
+
+        let deleted = delete_orphan_objects(&pool, &["obj_orph".to_string()])
+            .await
+            .expect("orphan");
+        assert_eq!(deleted, 1);
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects WHERE id = 'obj_orph'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_orphan_objects_keeps_referenced() {
+        let (pool, _dir) = setup().await;
+        // Object with TWO locations
+        let obj = make_object_row("obj_ref", "File", 1024);
+        upsert_object(&pool, &obj).await.expect("obj");
+
+        let mut loc1 = make_location_row("loc_r1", "obj_ref", "vol1", "/r1.txt", "r1.txt");
+        loc1.fid = Some(400);
+        upsert_location(&pool, &loc1).await.expect("loc1");
+
+        let mut loc2 = make_location_row("loc_r2", "obj_ref", "vol1", "/r2.txt", "r2.txt");
+        loc2.fid = Some(401);
+        upsert_location(&pool, &loc2).await.expect("loc2");
+
+        // Delete one location
+        delete_location_by_fid(&pool, "vol1", 400)
+            .await
+            .expect("delete");
+
+        // Orphan cleanup should keep the object (still has loc_r2)
+        let deleted = delete_orphan_objects(&pool, &["obj_ref".to_string()])
+            .await
+            .expect("orphan");
+        assert_eq!(deleted, 0);
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects WHERE id = 'obj_ref'")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
+    }
+
+    // ═══ Sub-phase 8.5: Relocate location tests ═══
+
+    #[tokio::test]
+    async fn test_relocate_location() {
+        let (pool, _dir) = setup().await;
+        insert_object_with_fid_location(
+            &pool, "obj_mv", "loc_mv", "vol1", "/old.txt", "old.txt", 500,
+        )
+        .await;
+
+        let moved = relocate_location(
+            &pool,
+            "vol1",
+            500,
+            "loc_mv_new",
+            "/new.txt",
+            "new.txt",
+            Some("txt"),
+            None,
+        )
+        .await
+        .expect("relocate");
+        assert!(moved);
+
+        // Old location gone
+        let old: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations WHERE id = 'loc_mv'")
+            .fetch_one(&pool)
+            .await
+            .expect("old");
+        assert_eq!(old.0, 0);
+
+        // New location exists
+        let new: (String,) = sqlx::query_as("SELECT path FROM locations WHERE id = 'loc_mv_new'")
+            .fetch_one(&pool)
+            .await
+            .expect("new");
+        assert_eq!(new.0, "/new.txt");
+    }
+
+    #[tokio::test]
+    async fn test_relocate_location_nonexistent() {
+        let (pool, _dir) = setup().await;
+        let moved = relocate_location(
+            &pool, "vol1", 99999, "loc_new", "/new.txt", "new.txt", None, None,
+        )
+        .await
+        .expect("relocate");
+        assert!(!moved);
+    }
+
+    #[tokio::test]
+    async fn test_relocate_location_preserves_object_id() {
+        let (pool, _dir) = setup().await;
+        insert_object_with_fid_location(
+            &pool,
+            "obj_pres",
+            "loc_pres",
+            "vol1",
+            "/pres.txt",
+            "pres.txt",
+            600,
+        )
+        .await;
+
+        relocate_location(
+            &pool,
+            "vol1",
+            600,
+            "loc_pres_new",
+            "/moved.txt",
+            "moved.txt",
+            Some("txt"),
+            None,
+        )
+        .await
+        .expect("relocate");
+
+        let (oid,): (String,) =
+            sqlx::query_as("SELECT object_id FROM locations WHERE id = 'loc_pres_new'")
+                .fetch_one(&pool)
+                .await
+                .expect("oid");
+        assert_eq!(oid, "obj_pres");
     }
 }

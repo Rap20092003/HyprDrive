@@ -63,6 +63,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         include_str!("../../migrations/007_sync_operations.sql"),
         include_str!("../../migrations/008_file_types.sql"),
         include_str!("../../migrations/009_fts.sql"),
+        include_str!("../../migrations/010_fid_column.sql"),
+        include_str!("../../migrations/011_cursor_store.sql"),
     ];
 
     for (i, sql) in migrations.iter().enumerate() {
@@ -91,6 +93,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
@@ -188,5 +191,33 @@ mod tests {
                 .await
                 .expect("fts match");
         assert_eq!(row.0, 1);
+    }
+
+    #[tokio::test]
+    async fn test_fid_column_exists() {
+        let (pool, _dir) = test_pool().await;
+        // PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
+        let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as("PRAGMA table_info(locations)")
+                .fetch_all(&pool)
+                .await
+                .expect("table_info");
+        let has_fid = rows.iter().any(|r| r.1 == "fid");
+        assert!(has_fid, "locations table should have a fid column");
+    }
+
+    #[tokio::test]
+    async fn test_cursor_store_table_exists() {
+        let (pool, _dir) = test_pool().await;
+        sqlx::query("INSERT INTO cursor_store (volume_key, cursor_json) VALUES ('C', '{}')")
+            .execute(&pool)
+            .await
+            .expect("insert cursor_store");
+        let row: (String,) =
+            sqlx::query_as("SELECT cursor_json FROM cursor_store WHERE volume_key = 'C'")
+                .fetch_one(&pool)
+                .await
+                .expect("select cursor_store");
+        assert_eq!(row.0, "{}");
     }
 }
