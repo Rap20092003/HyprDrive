@@ -149,6 +149,11 @@ pub fn hash_entries_batch(
                 // Zero-byte file — deterministic hash without file I/O.
                 return (i, Ok(ObjectId::from_blake3(&[])));
             }
+            // Guard: skip entries that are actually directories despite is_dir=false
+            // (e.g., symlinks to directories on Linux reported as files by jwalk).
+            if entry.full_path.is_dir() {
+                return (i, Err("entry is a directory".to_string()));
+            }
             match hash_file(&entry.full_path) {
                 Ok(id) => (i, Ok(id)),
                 Err(e) => {

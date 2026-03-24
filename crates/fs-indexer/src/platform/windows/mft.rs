@@ -18,7 +18,11 @@ use std::path::Path;
 /// Minimum FRN for user files. FRNs 0–23 are NTFS metadata files
 /// ($MFT, $MFTMirr, $LogFile, $Volume, $AttrDef, ., $Bitmap, $Boot,
 /// $BadClus, $Secure, $UpCase, $Extend, and reserved entries).
-const MIN_USER_FRN: u64 = 24;
+pub(crate) const MIN_USER_FRN: u64 = 24;
+
+/// FRN of the NTFS root directory (the `.` entry).
+/// Every user file's parent chain terminates at this FRN.
+pub(crate) const NTFS_ROOT_FRN: u64 = 5;
 
 /// Win32 file attribute flag for directories.
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
@@ -234,6 +238,10 @@ mod tests {
     #[test]
     fn min_user_frn_skips_metadata() {
         assert_eq!(MIN_USER_FRN, 24);
+        assert_eq!(NTFS_ROOT_FRN, 5);
+        // Root must be below MIN_USER_FRN (it's a system entry that we
+        // deliberately exclude from topo_entries but need in parent_map).
+        assert!(NTFS_ROOT_FRN < MIN_USER_FRN);
     }
 
     #[test]
@@ -356,6 +364,85 @@ mod tests {
         let s = path.to_string_lossy();
         assert!(s.contains("d11"));
         assert!(s.contains("d2"));
+    }
+
+    #[test]
+    fn reconstruct_path_fails_without_root_then_succeeds_with_it() {
+        // Simulate real scenario: topo_entries do NOT contain FRN 5
+        // because mft_enumerate_topology() skips FRN < MIN_USER_FRN.
+        let topo_entries = vec![
+            TopoEntry {
+                fid: 100,
+                parent_fid: NTFS_ROOT_FRN,
+                name: OsString::from("Users"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 200,
+                parent_fid: 100,
+                name: OsString::from("report.pdf"),
+                is_dir: false,
+                attributes: 0,
+            },
+        ];
+
+        let mut parent_map = build_parent_map(&topo_entries);
+
+        // Without root → reconstruction fails (this was the bug)
+        let before = reconstruct_paths_cached(&[200], &parent_map, Path::new("C:\\"));
+        assert!(
+            before.get(&200).is_none(),
+            "should fail without root in map"
+        );
+
+        // With root → reconstruction succeeds (this is the fix)
+        parent_map.insert(NTFS_ROOT_FRN, (NTFS_ROOT_FRN, OsString::new()));
+        let after = reconstruct_paths_cached(&[200], &parent_map, Path::new("C:\\"));
+        let path = after
+            .get(&200)
+            .expect("should resolve after injecting root");
+        assert_eq!(path.to_string_lossy(), r"C:\Users\report.pdf");
+    }
+
+    #[test]
+    fn reconstruct_path_deep_chain_with_injected_root() {
+        let topo_entries = vec![
+            TopoEntry {
+                fid: 100,
+                parent_fid: NTFS_ROOT_FRN,
+                name: OsString::from("Users"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 101,
+                parent_fid: 100,
+                name: OsString::from("rajab"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 102,
+                parent_fid: 101,
+                name: OsString::from("Documents"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 200,
+                parent_fid: 102,
+                name: OsString::from("file.txt"),
+                is_dir: false,
+                attributes: 0,
+            },
+        ];
+        let mut parent_map = build_parent_map(&topo_entries);
+        parent_map.insert(NTFS_ROOT_FRN, (NTFS_ROOT_FRN, OsString::new()));
+
+        let result = reconstruct_paths_cached(&[200], &parent_map, Path::new("C:\\"));
+        let path = result.get(&200).expect("deep path should resolve");
+        assert_eq!(path.to_string_lossy(), r"C:\Users\rajab\Documents\file.txt");
     }
 
     /// This test requires admin privileges and a real NTFS volume.
