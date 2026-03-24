@@ -16,7 +16,7 @@ pub struct EnrichStats {
 }
 
 /// Batch size for handle operations to avoid handle exhaustion.
-const ENRICH_BATCH_SIZE: usize = 1000;
+const ENRICH_BATCH_SIZE: usize = 5000;
 
 /// RAII wrapper for Win32 HANDLEs that ensures `CloseHandle` is called on drop.
 struct SafeHandle(windows::Win32::Foundation::HANDLE);
@@ -45,9 +45,12 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileStandardInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_NORMAL,
-        FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FILE_STANDARD_INFO, OPEN_EXISTING,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
     };
+    // Use minimal access rights — FILE_READ_ATTRIBUTES (0x80) is enough
+    // for GetFileInformationByHandleEx(FileStandardInfo) and succeeds on
+    // many system files that deny FILE_GENERIC_READ.
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 
     let total = entries.len();
     let mut enriched = 0u64;
@@ -72,7 +75,7 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
             let handle_result = unsafe {
                 CreateFileW(
                     windows::core::PCWSTR(wide_path.as_ptr()),
-                    FILE_GENERIC_READ.0,
+                    FILE_READ_ATTRIBUTES,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     None,
                     OPEN_EXISTING,
@@ -151,7 +154,7 @@ mod tests {
 
     #[test]
     fn enrich_batch_size_reasonable() {
-        assert_eq!(ENRICH_BATCH_SIZE, 1000);
+        assert_eq!(ENRICH_BATCH_SIZE, 5000);
     }
 
     #[test]

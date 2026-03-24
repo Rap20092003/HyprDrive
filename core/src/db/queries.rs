@@ -282,6 +282,70 @@ pub async fn upsert_locations_batch(
     Ok(())
 }
 
+/// Prepare the database for a bulk load by disabling FTS triggers and
+/// switching synchronous to OFF for maximum write throughput.
+///
+/// MUST be paired with [`bulk_load_finish`] after all inserts complete.
+pub async fn bulk_load_begin(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Drop FTS triggers — they fire per-row and dominate bulk insert time.
+    sqlx::raw_sql(
+        "DROP TRIGGER IF EXISTS locations_ai;
+         DROP TRIGGER IF EXISTS locations_ad;
+         DROP TRIGGER IF EXISTS locations_au;",
+    )
+    .execute(pool)
+    .await?;
+
+    // Temporary: disable fsync during bulk load. Safe because a crash
+    // during initial scan just means re-scanning, not data corruption.
+    sqlx::query("PRAGMA synchronous = OFF")
+        .execute(pool)
+        .await?;
+    tracing::info!("bulk load mode: FTS triggers dropped, synchronous=OFF");
+    Ok(())
+}
+
+/// Finish a bulk load: rebuild FTS index in one pass and restore triggers + synchronous.
+pub async fn bulk_load_finish(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    // Rebuild the FTS5 index in a single pass from the locations table.
+    // Much faster than 847K individual trigger fires.
+    let rebuild_start = std::time::Instant::now();
+    sqlx::query("INSERT INTO files_fts(files_fts) VALUES('rebuild')")
+        .execute(pool)
+        .await?;
+    tracing::info!(
+        elapsed_ms = rebuild_start.elapsed().as_millis() as u64,
+        "FTS5 index rebuilt"
+    );
+
+    // Re-create triggers for incremental updates going forward.
+    sqlx::raw_sql(
+        "CREATE TRIGGER IF NOT EXISTS locations_ai AFTER INSERT ON locations BEGIN
+            INSERT INTO files_fts(rowid, name, path, extension)
+            VALUES (new.rowid, new.name, new.path, new.extension);
+         END;
+         CREATE TRIGGER IF NOT EXISTS locations_ad AFTER DELETE ON locations BEGIN
+            INSERT INTO files_fts(files_fts, rowid, name, path, extension)
+            VALUES ('delete', old.rowid, old.name, old.path, old.extension);
+         END;
+         CREATE TRIGGER IF NOT EXISTS locations_au AFTER UPDATE ON locations BEGIN
+            INSERT INTO files_fts(files_fts, rowid, name, path, extension)
+            VALUES ('delete', old.rowid, old.name, old.path, old.extension);
+            INSERT INTO files_fts(rowid, name, path, extension)
+            VALUES (new.rowid, new.name, new.path, new.extension);
+         END;",
+    )
+    .execute(pool)
+    .await?;
+
+    // Restore safe synchronous mode.
+    sqlx::query("PRAGMA synchronous = NORMAL")
+        .execute(pool)
+        .await?;
+    tracing::info!("bulk load complete: FTS triggers restored, synchronous=NORMAL");
+    Ok(())
+}
+
 /// Count how many locations reference a given object.
 #[tracing::instrument(skip(pool), fields(object_id))]
 pub async fn count_locations_for_object(

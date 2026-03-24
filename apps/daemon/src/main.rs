@@ -79,10 +79,19 @@ async fn run_full_scan(
         pool.clone(),
         Arc::clone(cache),
     );
+
+    // Bulk load mode: drop FTS triggers + synchronous=OFF for 10-20x speedup.
+    hyprdrive_core::db::queries::bulk_load_begin(pool)
+        .await
+        .context("bulk_load_begin failed")?;
     let stats = pipeline
         .process_entries(&result.entries)
         .await
         .context("object pipeline failed")?;
+    // Rebuild FTS index in one pass and restore triggers.
+    hyprdrive_core::db::queries::bulk_load_finish(pool)
+        .await
+        .context("bulk_load_finish (FTS rebuild) failed")?;
     info!(
         total = stats.total,
         hashed = stats.hashed,
