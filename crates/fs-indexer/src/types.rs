@@ -43,6 +43,8 @@ pub enum FsChange {
     Deleted {
         /// FRN of the deleted entry.
         fid: u64,
+        /// Full path (available on Linux where fid is path-derived, not inode-derived).
+        path: Option<PathBuf>,
     },
     /// A file or directory was moved or renamed.
     Moved {

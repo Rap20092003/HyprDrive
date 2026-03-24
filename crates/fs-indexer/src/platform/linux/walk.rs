@@ -24,7 +24,8 @@ pub(crate) fn make_fid(dev: u64, ino: u64) -> u64 {
     // We XOR the device with a large prime then combine with the full inode.
     // This preserves all 64 bits of ino and mixes in dev.
     let dev_mixed = dev.wrapping_mul(0x517c_c1b7_2722_0a95); // large odd constant
-    dev_mixed ^ ino
+    // Mask to 63 bits so the fid fits in SQLite's i64 column without overflow.
+    (dev_mixed ^ ino) & 0x7FFF_FFFF_FFFF_FFFF
 }
 
 /// Walk a directory tree, returning topology entries with inode-based fids.

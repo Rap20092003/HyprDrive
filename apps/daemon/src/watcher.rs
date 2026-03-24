@@ -102,7 +102,7 @@ impl WatcherLoop {
 fn change_fid(change: &FsChange) -> Option<u64> {
     match change {
         FsChange::Created(entry) => Some(entry.fid),
-        FsChange::Deleted { fid } => Some(*fid),
+        FsChange::Deleted { fid, .. } => Some(*fid),
         FsChange::Moved { fid, .. } => Some(*fid),
         FsChange::Modified { fid, .. } => Some(*fid),
         FsChange::FullRescanNeeded { .. } => None,
@@ -185,6 +185,11 @@ impl CoalescedState {
 
             // ── Cancelled then anything else → just that event ──
             (CoalescedState::Cancelled, _) => CoalescedState::Single(event),
+
+            // ── Created then Modified → keep Created (it has full data; file is new) ──
+            (CoalescedState::Single(created @ FsChange::Created(_)), FsChange::Modified { .. }) => {
+                CoalescedState::Single(created)
+            }
 
             // ── Moved then Modified → preserve both ──
             (CoalescedState::Single(moved @ FsChange::Moved { .. }), FsChange::Modified { .. }) => {
@@ -269,7 +274,7 @@ mod tests {
     fn test_coalesce_create_delete_cancel() {
         let changes = vec![
             FsChange::Created(make_entry(42)),
-            FsChange::Deleted { fid: 42 },
+            FsChange::Deleted { fid: 42, path: None },
         ];
         let result = coalesce_changes(changes);
         assert!(result.is_empty(), "Created+Deleted same fid should cancel");
@@ -278,7 +283,7 @@ mod tests {
     #[test]
     fn test_coalesce_delete_create_becomes_modified() {
         let changes = vec![
-            FsChange::Deleted { fid: 42 },
+            FsChange::Deleted { fid: 42, path: None },
             FsChange::Created(make_entry(42)),
         ];
         let result = coalesce_changes(changes);
@@ -337,7 +342,7 @@ mod tests {
         // Created→Deleted→Created for same fid: first pair cancels, second Created survives.
         let changes = vec![
             FsChange::Created(make_entry(42)),
-            FsChange::Deleted { fid: 42 },
+            FsChange::Deleted { fid: 42, path: None },
             FsChange::Created(make_entry(42)),
         ];
         let result = coalesce_changes(changes);
@@ -345,6 +350,25 @@ mod tests {
         assert!(
             matches!(&result[0], FsChange::Created(_)),
             "should revive as Created after cancel+re-create"
+        );
+    }
+
+    #[test]
+    fn test_coalesce_created_then_modified_keeps_created() {
+        // inotify fires both CREATE and MODIFY for a new file write.
+        // The coalescer should keep Created (it has full data).
+        let changes = vec![
+            FsChange::Created(make_entry(42)),
+            FsChange::Modified {
+                fid: 42,
+                new_size: 200,
+            },
+        ];
+        let result = coalesce_changes(changes);
+        assert_eq!(result.len(), 1);
+        assert!(
+            matches!(&result[0], FsChange::Created(_)),
+            "Created+Modified should keep Created"
         );
     }
 
