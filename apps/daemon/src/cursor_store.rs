@@ -6,10 +6,6 @@
 //! This is platform-agnostic — each platform serializes its own cursor type
 //! (e.g. `UsnCursor`, `LinuxCursor`) to JSON before calling `save`.
 
-// Currently only constructed on Windows (wired in main.rs cfg(windows) block).
-// Will be used on Linux/macOS once their listeners are implemented.
-#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
-
 use hyprdrive_core::db::queries;
 use hyprdrive_fs_indexer::CursorStore;
 use sqlx::SqlitePool;
