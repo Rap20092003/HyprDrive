@@ -34,8 +34,8 @@ fn default_scan_root() -> std::path::PathBuf {
 /// Derive a volume ID from a scan root path.
 ///
 /// - Windows: "C" from "C:\\"
-/// - Linux: last path component (e.g. "home" from "/home")
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+/// - Linux/macOS: last path component (e.g. "home" from "/home")
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn derive_volume_id(scan_root: &std::path::Path) -> String {
     let lossy = scan_root.to_string_lossy();
     // Windows: extract drive letter.
