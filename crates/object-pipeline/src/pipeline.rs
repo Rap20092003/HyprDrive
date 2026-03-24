@@ -206,7 +206,11 @@ impl ObjectPipeline {
                     .map(|e| e.to_string_lossy().to_string());
 
                 // Resolve parent_id: look up parent_fid in the fid→LocationId map.
-                let parent_id = if entry.parent_fid == NO_PARENT_FID {
+                // Self-referencing entries (parent_fid == fid, e.g. NTFS root) get None
+                // to avoid FK violations on self-insert.
+                let parent_id = if entry.parent_fid == NO_PARENT_FID
+                    || entry.parent_fid == entry.fid
+                {
                     None
                 } else {
                     fid_to_location_id.get(&entry.parent_fid).cloned()
