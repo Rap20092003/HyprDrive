@@ -209,6 +209,9 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "volume scan failed — will retry on next cycle");
+                for cause in e.chain().skip(1) {
+                    tracing::warn!(cause = %cause, "  caused by");
+                }
             }
         }
     }

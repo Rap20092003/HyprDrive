@@ -230,6 +230,11 @@ pub async fn upsert_locations_batch(
         return Ok(());
     }
     let mut tx = pool.begin().await?;
+    // Defer FK checks until COMMIT so rows within the same batch can
+    // reference each other (e.g. parent directories inserted after children).
+    sqlx::query("PRAGMA defer_foreign_keys = ON")
+        .execute(&mut *tx)
+        .await?;
     for row in rows {
         sqlx::query(
             "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id,
