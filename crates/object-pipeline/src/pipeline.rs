@@ -200,12 +200,13 @@ impl ObjectPipeline {
                 });
 
                 // Reuse cached location_id instead of re-computing BLAKE3 hash.
-                let location_id = fid_to_location_id
-                    .get(&entry.fid)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        location_id_for_entry(&self.config.volume_id, &entry.full_path)
-                    });
+                let location_id =
+                    fid_to_location_id
+                        .get(&entry.fid)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            location_id_for_entry(&self.config.volume_id, &entry.full_path)
+                        });
                 let extension = entry
                     .full_path
                     .extension()
@@ -214,13 +215,12 @@ impl ObjectPipeline {
                 // Resolve parent_id: look up parent_fid in the fid→LocationId map.
                 // Self-referencing entries (parent_fid == fid, e.g. NTFS root) get None
                 // to avoid FK violations on self-insert.
-                let parent_id = if entry.parent_fid == NO_PARENT_FID
-                    || entry.parent_fid == entry.fid
-                {
-                    None
-                } else {
-                    fid_to_location_id.get(&entry.parent_fid).cloned()
-                };
+                let parent_id =
+                    if entry.parent_fid == NO_PARENT_FID || entry.parent_fid == entry.fid {
+                        None
+                    } else {
+                        fid_to_location_id.get(&entry.parent_fid).cloned()
+                    };
 
                 location_rows.push(LocationRow {
                     id: location_id,

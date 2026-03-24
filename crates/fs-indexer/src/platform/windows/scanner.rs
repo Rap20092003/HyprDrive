@@ -42,11 +42,32 @@ fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<Sc
 
     // Build parent map for path reconstruction
     let mut parent_map = mft::build_parent_map(&topo_entries);
-    // NTFS root directory (FRN 5) is excluded by the MIN_USER_FRN filter
-    // in mft_enumerate_topology(), but every path chain terminates at it.
-    // Insert as a self-referencing root with empty name so
-    // reconstruct_path_memo() resolves it to the volume root path.
-    parent_map.insert(mft::NTFS_ROOT_FRN, (mft::NTFS_ROOT_FRN, OsString::new()));
+
+    // Dynamically detect the NTFS root FRN. usn-journal-rs returns full
+    // 64-bit file references (record number + sequence number in upper bits),
+    // so the root is NOT always 5 — it could be e.g. 0x0001000000000005.
+    // Strategy: find the most-referenced parent_fid that has no entry in
+    // parent_map (i.e. it was filtered out by MIN_USER_FRN).
+    {
+        let mut missing_parents: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for entry in &topo_entries {
+            if !parent_map.contains_key(&entry.parent_fid) {
+                *missing_parents.entry(entry.parent_fid).or_default() += 1;
+            }
+        }
+        if let Some((&root_fid, &count)) = missing_parents.iter().max_by_key(|(_, c)| *c) {
+            tracing::info!(
+                root_fid,
+                root_fid_hex = format!("0x{:016X}", root_fid),
+                references = count,
+                "detected NTFS root FRN dynamically"
+            );
+            parent_map.insert(root_fid, (root_fid, OsString::new()));
+        } else {
+            tracing::warn!("no missing parent FRN detected — root may already be in map");
+        }
+    }
 
     // Phase 2: Convert to IndexEntry with paths, then enrich sizes
     // Use memoized path reconstruction — much faster for large trees because
