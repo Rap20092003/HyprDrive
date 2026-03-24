@@ -20,10 +20,6 @@ use std::path::Path;
 /// $BadClus, $Secure, $UpCase, $Extend, and reserved entries).
 pub(crate) const MIN_USER_FRN: u64 = 24;
 
-/// FRN of the NTFS root directory (the `.` entry).
-/// Every user file's parent chain terminates at this FRN.
-pub(crate) const NTFS_ROOT_FRN: u64 = 5;
-
 /// Win32 file attribute flag for directories.
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 /// Win32 file attribute flag for reparse points (junctions, symlinks).
@@ -235,13 +231,16 @@ fn reconstruct_path_memo(
 mod tests {
     use super::*;
 
+    /// NTFS root FRN record number used in test scenarios.
+    const TEST_ROOT_FRN: u64 = 5;
+
     #[test]
     fn min_user_frn_skips_metadata() {
         assert_eq!(MIN_USER_FRN, 24);
-        assert_eq!(NTFS_ROOT_FRN, 5);
-        // Root must be below MIN_USER_FRN (it's a system entry that we
-        // deliberately exclude from topo_entries but need in parent_map).
-        assert!(NTFS_ROOT_FRN < MIN_USER_FRN);
+        // NTFS root (FRN 5) is below MIN_USER_FRN, so it gets excluded
+        // from topo_entries. The dynamic root detection in scanner.rs
+        // handles this at runtime.
+        assert!(TEST_ROOT_FRN < MIN_USER_FRN);
     }
 
     #[test]
@@ -373,7 +372,7 @@ mod tests {
         let topo_entries = vec![
             TopoEntry {
                 fid: 100,
-                parent_fid: NTFS_ROOT_FRN,
+                parent_fid: TEST_ROOT_FRN,
                 name: OsString::from("Users"),
                 is_dir: true,
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
@@ -397,7 +396,7 @@ mod tests {
         );
 
         // With root → reconstruction succeeds (this is the fix)
-        parent_map.insert(NTFS_ROOT_FRN, (NTFS_ROOT_FRN, OsString::new()));
+        parent_map.insert(TEST_ROOT_FRN, (TEST_ROOT_FRN, OsString::new()));
         let after = reconstruct_paths_cached(&[200], &parent_map, Path::new("C:\\"));
         let path = after
             .get(&200)
@@ -410,7 +409,7 @@ mod tests {
         let topo_entries = vec![
             TopoEntry {
                 fid: 100,
-                parent_fid: NTFS_ROOT_FRN,
+                parent_fid: TEST_ROOT_FRN,
                 name: OsString::from("Users"),
                 is_dir: true,
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
@@ -438,7 +437,7 @@ mod tests {
             },
         ];
         let mut parent_map = build_parent_map(&topo_entries);
-        parent_map.insert(NTFS_ROOT_FRN, (NTFS_ROOT_FRN, OsString::new()));
+        parent_map.insert(TEST_ROOT_FRN, (TEST_ROOT_FRN, OsString::new()));
 
         let result = reconstruct_paths_cached(&[200], &parent_map, Path::new("C:\\"));
         let path = result.get(&200).expect("deep path should resolve");
