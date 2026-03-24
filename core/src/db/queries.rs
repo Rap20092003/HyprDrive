@@ -561,6 +561,230 @@ pub async fn relocate_location(
     Ok(true)
 }
 
+// ═══ Disk intelligence queries ═══
+
+/// Get aggregate summary statistics for a volume.
+pub async fn volume_summary(
+    pool: &SqlitePool,
+    volume_id: &str,
+) -> Result<crate::db::types::VolumeSummary, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT
+            COALESCE(SUM(CASE WHEN is_directory = 0 THEN 1 ELSE 0 END), 0) AS total_files,
+            COALESCE(SUM(CASE WHEN is_directory = 1 THEN 1 ELSE 0 END), 0) AS total_dirs,
+            COALESCE(SUM(CASE WHEN is_directory = 0 THEN size_bytes ELSE 0 END), 0) AS total_bytes,
+            COALESCE(SUM(CASE WHEN is_directory = 0 THEN allocated_bytes ELSE 0 END), 0) AS total_allocated,
+            COALESCE(SUM(CASE WHEN is_directory = 0 THEN allocated_bytes - size_bytes ELSE 0 END), 0) AS wasted_bytes
+         FROM locations
+         WHERE volume_id = ?1",
+    )
+    .bind(volume_id)
+    .fetch_one(pool)
+    .await
+}
+
+/// Return the N largest files on a volume, ordered by size descending.
+pub async fn top_largest_files(
+    pool: &SqlitePool,
+    volume_id: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::types::FileRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.id AS location_id, l.name, l.extension, l.path,
+                l.is_directory, l.size_bytes, l.allocated_bytes,
+                l.modified_at, o.id AS object_id, o.kind, o.mime_type
+         FROM locations l
+         JOIN objects o ON l.object_id = o.id
+         WHERE l.volume_id = ?1 AND l.is_directory = 0 AND l.size_bytes > 0
+         ORDER BY l.size_bytes DESC
+         LIMIT ?2",
+    )
+    .bind(volume_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Populate the dir_sizes table by aggregating file sizes per directory.
+///
+/// Two-pass approach:
+/// 1. Direct: SUM children's size_bytes and allocated_bytes per parent_id
+/// 2. Cumulative: iterative bottom-up rollup adds subdirectory totals
+///
+/// Called after bulk load completes. Idempotent (clears before inserting).
+pub async fn populate_dir_sizes(pool: &SqlitePool, volume_id: &str) -> Result<u64, sqlx::Error> {
+    let start = std::time::Instant::now();
+
+    // Clear existing data for this volume's directories
+    sqlx::query(
+        "DELETE FROM dir_sizes WHERE location_id IN
+         (SELECT id FROM locations WHERE volume_id = ?1 AND is_directory = 1)",
+    )
+    .bind(volume_id)
+    .execute(pool)
+    .await?;
+
+    // Pass 1: Direct children aggregation per parent directory.
+    let result = sqlx::query(
+        "INSERT INTO dir_sizes (location_id, file_count, total_bytes, allocated_bytes, cumulative_allocated)
+         SELECT
+             l.parent_id,
+             COALESCE(SUM(CASE WHEN l.is_directory = 0 THEN 1 ELSE 0 END), 0),
+             COALESCE(SUM(CASE WHEN l.is_directory = 0 THEN l.size_bytes ELSE 0 END), 0),
+             COALESCE(SUM(CASE WHEN l.is_directory = 0 THEN l.allocated_bytes ELSE 0 END), 0),
+             COALESCE(SUM(l.allocated_bytes), 0)
+         FROM locations l
+         WHERE l.volume_id = ?1
+           AND l.parent_id IS NOT NULL
+           AND l.parent_id IN (SELECT id FROM locations WHERE volume_id = ?1 AND is_directory = 1)
+         GROUP BY l.parent_id
+         ON CONFLICT(location_id) DO UPDATE SET
+             file_count = excluded.file_count,
+             total_bytes = excluded.total_bytes,
+             allocated_bytes = excluded.allocated_bytes,
+             cumulative_allocated = excluded.cumulative_allocated,
+             updated_at = datetime('now')",
+    )
+    .bind(volume_id)
+    .execute(pool)
+    .await?;
+
+    let direct_count = result.rows_affected();
+
+    // Pass 2: Bottom-up cumulative rollup.
+    // Each dir's cumulative = own files' allocated + SUM(children dirs' cumulative).
+    // Iterate until convergence. Converges in O(max_depth) passes.
+    let mut iterations = 0u32;
+    loop {
+        iterations += 1;
+        let updated = sqlx::query(
+            "UPDATE dir_sizes SET cumulative_allocated = (
+                SELECT COALESCE(dir_sizes.allocated_bytes, 0) +
+                       COALESCE((SELECT SUM(child_ds.cumulative_allocated)
+                                 FROM locations child
+                                 JOIN dir_sizes child_ds ON child_ds.location_id = child.id
+                                 WHERE child.parent_id = dir_sizes.location_id
+                                   AND child.is_directory = 1), 0)
+             )
+             WHERE location_id IN (
+                SELECT id FROM locations WHERE volume_id = ?1 AND is_directory = 1
+             )",
+        )
+        .bind(volume_id)
+        .execute(pool)
+        .await?;
+
+        if updated.rows_affected() == 0 || iterations >= 50 {
+            break;
+        }
+    }
+
+    tracing::info!(
+        direct_dirs = direct_count,
+        iterations,
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "dir_sizes populated"
+    );
+
+    Ok(direct_count)
+}
+
+/// Return the N largest directories by cumulative allocated bytes.
+///
+/// Requires `populate_dir_sizes()` to have been called first.
+pub async fn top_largest_dirs(
+    pool: &SqlitePool,
+    volume_id: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::types::TopDirRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.path, l.name, ds.file_count, ds.total_bytes, ds.cumulative_allocated
+         FROM dir_sizes ds
+         JOIN locations l ON ds.location_id = l.id
+         WHERE l.volume_id = ?1
+         ORDER BY ds.cumulative_allocated DESC
+         LIMIT ?2",
+    )
+    .bind(volume_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Find directories with the most wasted disk space.
+///
+/// Wasted = allocated_bytes - total_bytes. High waste ratios indicate
+/// NTFS cluster slack, sparse files, or many small files.
+pub async fn wasted_space_report(
+    pool: &SqlitePool,
+    volume_id: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::types::WastedSpaceRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.path, l.name,
+                ds.total_bytes,
+                ds.allocated_bytes,
+                (ds.allocated_bytes - ds.total_bytes) AS wasted_bytes,
+                CAST(ds.allocated_bytes AS REAL) / MAX(ds.total_bytes, 1) AS waste_ratio
+         FROM dir_sizes ds
+         JOIN locations l ON ds.location_id = l.id
+         WHERE l.volume_id = ?1 AND ds.total_bytes > 0
+         ORDER BY wasted_bytes DESC
+         LIMIT ?2",
+    )
+    .bind(volume_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Find duplicate files — objects that exist at multiple locations.
+///
+/// Returns groups ordered by total wasted bytes (most wasteful first).
+/// Only includes files (not directories) with size > 0.
+pub async fn duplicates_report(
+    pool: &SqlitePool,
+    volume_id: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::types::DuplicateGroupRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT o.id AS object_id,
+                COUNT(*) AS location_count,
+                o.size_bytes,
+                (COUNT(*) - 1) * o.size_bytes AS wasted_bytes
+         FROM locations l
+         JOIN objects o ON l.object_id = o.id
+         WHERE l.volume_id = ?1 AND l.is_directory = 0 AND o.size_bytes > 0
+         GROUP BY o.id
+         HAVING COUNT(*) > 1
+         ORDER BY wasted_bytes DESC
+         LIMIT ?2",
+    )
+    .bind(volume_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Get all locations for a specific object (duplicate group detail view).
+pub async fn duplicate_locations(
+    pool: &SqlitePool,
+    object_id: &str,
+) -> Result<Vec<crate::db::types::FileRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.id AS location_id, l.name, l.extension, l.path,
+                l.is_directory, l.size_bytes, l.allocated_bytes,
+                l.modified_at, o.id AS object_id, o.kind, o.mime_type
+         FROM locations l
+         JOIN objects o ON l.object_id = o.id
+         WHERE o.id = ?1
+         ORDER BY l.path",
+    )
+    .bind(object_id)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -623,6 +847,179 @@ mod tests {
             .await
             .expect("insert location");
         }
+    }
+
+    /// Create test files WITH size_bytes and allocated_bytes on locations.
+    /// Required for disk intelligence queries (the default helper leaves these at 0).
+    async fn insert_sized_files(pool: &SqlitePool, parent_id: &str, count: usize) {
+        for i in 0..count {
+            let obj_id = format!("sobj_{i:05}");
+            let loc_id = format!("sloc_{i:05}");
+            let name = format!("sized_{i:05}.txt");
+            let path = format!("/test/{name}");
+            let size = (i as i64 + 1) * 1024; // 1KB, 2KB, 3KB...
+            let allocated = ((size / 4096) + 1) * 4096; // Round up to 4K clusters
+
+            sqlx::query(
+                "INSERT INTO objects (id, kind, size_bytes, created_at, updated_at)
+                 VALUES (?1, 'File', ?2, datetime('now'), datetime('now'))",
+            )
+            .bind(&obj_id)
+            .bind(size)
+            .execute(pool)
+            .await
+            .expect("insert sized object");
+
+            sqlx::query(
+                "INSERT INTO locations (id, object_id, volume_id, path, name, extension,
+                                        parent_id, is_directory, size_bytes, allocated_bytes,
+                                        created_at, modified_at)
+                 VALUES (?1, ?2, 'vol1', ?3, ?4, 'txt', ?5, 0, ?6, ?7, datetime('now'), datetime('now'))",
+            )
+            .bind(&loc_id)
+            .bind(&obj_id)
+            .bind(&path)
+            .bind(&name)
+            .bind(parent_id)
+            .bind(size)
+            .bind(allocated)
+            .execute(pool)
+            .await
+            .expect("insert sized location");
+        }
+    }
+
+    // ═══ Disk Intelligence Tests ═══
+
+    #[tokio::test]
+    async fn test_volume_summary() {
+        let (pool, _dir) = setup().await;
+        let pid = create_parent_dir(&pool).await;
+        insert_sized_files(&pool, &pid, 10).await;
+
+        let s = volume_summary(&pool, "vol1").await.expect("summary");
+        assert_eq!(s.total_files, 10);
+        assert_eq!(s.total_dirs, 1); // parent dir
+        assert!(s.total_bytes > 0, "total_bytes should be > 0");
+        assert!(s.total_allocated >= s.total_bytes, "allocated >= logical");
+        assert!(s.wasted_bytes >= 0, "wasted should be >= 0");
+    }
+
+    #[tokio::test]
+    async fn test_top_largest_files() {
+        let (pool, _dir) = setup().await;
+        let pid = create_parent_dir(&pool).await;
+        insert_sized_files(&pool, &pid, 20).await;
+
+        let top5 = top_largest_files(&pool, "vol1", 5).await.expect("top5");
+        assert_eq!(top5.len(), 5);
+        for i in 1..top5.len() {
+            assert!(
+                top5[i - 1].size_bytes >= top5[i].size_bytes,
+                "not sorted: {} < {}",
+                top5[i - 1].size_bytes,
+                top5[i].size_bytes
+            );
+        }
+        assert_eq!(top5[0].size_bytes, 20 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_populate_dir_sizes() {
+        let (pool, _dir) = setup().await;
+        let pid = create_parent_dir(&pool).await;
+        insert_sized_files(&pool, &pid, 10).await;
+
+        let count = populate_dir_sizes(&pool, "vol1").await.expect("populate");
+        assert!(count > 0, "should populate at least 1 dir");
+
+        let ds: Option<crate::db::types::DirSizeRow> =
+            sqlx::query_as("SELECT * FROM dir_sizes WHERE location_id = ?1")
+                .bind(&pid)
+                .fetch_optional(&pool)
+                .await
+                .expect("query");
+
+        let ds = ds.expect("dir_sizes entry should exist");
+        assert_eq!(ds.file_count, 10);
+        assert!(ds.total_bytes > 0, "total_bytes > 0");
+        assert!(ds.allocated_bytes > 0, "allocated_bytes > 0");
+        assert!(
+            ds.cumulative_allocated >= ds.allocated_bytes,
+            "cumulative >= direct"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_top_largest_dirs() {
+        let (pool, _dir) = setup().await;
+        let pid = create_parent_dir(&pool).await;
+        insert_sized_files(&pool, &pid, 10).await;
+        populate_dir_sizes(&pool, "vol1").await.expect("populate");
+
+        let top = top_largest_dirs(&pool, "vol1", 5).await.expect("top");
+        assert!(!top.is_empty(), "should have at least 1 dir");
+        assert_eq!(top[0].file_count, 10);
+        assert!(top[0].cumulative_allocated > 0);
+    }
+
+    #[tokio::test]
+    async fn test_wasted_space_report() {
+        let (pool, _dir) = setup().await;
+        let pid = create_parent_dir(&pool).await;
+        insert_sized_files(&pool, &pid, 10).await;
+        populate_dir_sizes(&pool, "vol1").await.expect("populate");
+
+        let report = wasted_space_report(&pool, "vol1", 10)
+            .await
+            .expect("report");
+        assert!(!report.is_empty(), "should have at least 1 dir with waste");
+        for row in &report {
+            assert!(row.wasted_bytes >= 0, "wasted_bytes should be >= 0");
+            assert!(row.waste_ratio >= 1.0, "waste_ratio should be >= 1.0");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_duplicates_report() {
+        let (pool, _dir) = setup().await;
+
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes, created_at, updated_at)
+             VALUES ('dup_obj', 'File', 1024, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("obj");
+
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory,
+                                    size_bytes, allocated_bytes, created_at, modified_at)
+             VALUES ('loc_a', 'dup_obj', 'vol1', '/a/file.txt', 'file.txt', 0,
+                     1024, 4096, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("loc_a");
+
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory,
+                                    size_bytes, allocated_bytes, created_at, modified_at)
+             VALUES ('loc_b', 'dup_obj', 'vol1', '/b/file.txt', 'file.txt', 0,
+                     1024, 4096, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("loc_b");
+
+        let dupes = duplicates_report(&pool, "vol1", 10).await.expect("dupes");
+        assert_eq!(dupes.len(), 1);
+        assert_eq!(dupes[0].location_count, 2);
+        assert_eq!(dupes[0].size_bytes, 1024);
+        assert_eq!(dupes[0].wasted_bytes, 1024);
+
+        let locs = duplicate_locations(&pool, "dup_obj").await.expect("locs");
+        assert_eq!(locs.len(), 2);
     }
 
     #[tokio::test]

@@ -66,6 +66,7 @@ async fn run_full_scan(
     let result = hyprdrive_fs_indexer::auto_scan(scan_root).context("volume scan failed")?;
 
     let volume_id = derive_volume_id(scan_root);
+    let volume_id_for_intel = volume_id.clone();
     info!(
         entries = result.entries.len(),
         has_usn_cursor = result.cursor.is_some(),
@@ -92,6 +93,25 @@ async fn run_full_scan(
     hyprdrive_core::db::queries::bulk_load_finish(pool)
         .await
         .context("bulk_load_finish (FTS rebuild) failed")?;
+
+    // Populate directory size aggregations for disk intelligence.
+    hyprdrive_core::db::queries::populate_dir_sizes(pool, &volume_id_for_intel)
+        .await
+        .context("dir_sizes population failed")?;
+
+    // Log disk intelligence summary.
+    let summary = hyprdrive_core::db::queries::volume_summary(pool, &volume_id_for_intel)
+        .await
+        .context("volume summary failed")?;
+    info!(
+        files = summary.total_files,
+        dirs = summary.total_dirs,
+        total_bytes = summary.total_bytes,
+        allocated_bytes = summary.total_allocated,
+        wasted_bytes = summary.wasted_bytes,
+        "disk intelligence summary"
+    );
+
     info!(
         total = stats.total,
         hashed = stats.hashed,

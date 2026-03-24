@@ -119,3 +119,63 @@ pub struct FileTypeRow {
     /// Hex color for UI
     pub color: String,
 }
+
+/// Aggregate summary of a volume's contents.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct VolumeSummary {
+    /// Total number of files
+    pub total_files: i64,
+    /// Total number of directories
+    pub total_dirs: i64,
+    /// Sum of file sizes (logical bytes)
+    pub total_bytes: i64,
+    /// Sum of allocated bytes on disk
+    pub total_allocated: i64,
+    /// Wasted bytes (allocated - logical)
+    pub wasted_bytes: i64,
+}
+
+/// A directory with its aggregated size info for disk intelligence.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TopDirRow {
+    /// Directory path
+    pub path: String,
+    /// Directory name
+    pub name: String,
+    /// Number of direct child files
+    pub file_count: i64,
+    /// Sum of direct children's logical bytes
+    pub total_bytes: i64,
+    /// Cumulative allocated bytes (including all subdirectories)
+    pub cumulative_allocated: i64,
+}
+
+/// A directory with wasted space information.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WastedSpaceRow {
+    /// Directory path
+    pub path: String,
+    /// Directory name
+    pub name: String,
+    /// Logical bytes (file content)
+    pub total_bytes: i64,
+    /// Allocated bytes on disk
+    pub allocated_bytes: i64,
+    /// Wasted bytes (allocated - logical)
+    pub wasted_bytes: i64,
+    /// Waste ratio (allocated / max(logical, 1))
+    pub waste_ratio: f64,
+}
+
+/// A group of duplicate files sharing the same content hash.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DuplicateGroupRow {
+    /// Content hash (object_id)
+    pub object_id: String,
+    /// Number of locations with this content
+    pub location_count: i64,
+    /// Size of each copy in bytes
+    pub size_bytes: i64,
+    /// Total wasted bytes: (count - 1) * size
+    pub wasted_bytes: i64,
+}
