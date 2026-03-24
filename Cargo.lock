@@ -849,6 +849,7 @@ dependencies = [
  "hyprdrive-fs-indexer",
  "hyprdrive-object-pipeline",
  "redb",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",

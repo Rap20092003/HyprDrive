@@ -13,8 +13,13 @@ use hyprdrive_core::domain::id::ObjectId;
 use hyprdrive_fs_indexer::types::IndexEntry;
 use redb::Database;
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Sentinel value for "no parent" in `IndexEntry.parent_fid`.
+pub const NO_PARENT_FID: u64 = 0;
 
 /// Configuration for the object pipeline.
 #[derive(Debug, Clone)]
@@ -51,12 +56,21 @@ impl Default for PipelineConfig {
 pub struct ObjectPipeline {
     config: PipelineConfig,
     pool: SqlitePool,
-    cache: Database,
+    cache: Arc<Database>,
 }
 
 impl ObjectPipeline {
     /// Create a new pipeline with the given configuration.
     pub fn new(config: PipelineConfig, pool: SqlitePool, cache: Database) -> Self {
+        Self {
+            config,
+            pool,
+            cache: Arc::new(cache),
+        }
+    }
+
+    /// Create a new pipeline with a shared cache (Arc<Database>).
+    pub fn new_shared(config: PipelineConfig, pool: SqlitePool, cache: Arc<Database>) -> Self {
         Self {
             config,
             pool,
@@ -88,6 +102,8 @@ impl ObjectPipeline {
                 cached: 0,
                 skipped: 0,
                 errors: 0,
+                directories: 0,
+                zero_byte: 0,
                 elapsed: start.elapsed(),
             });
         }
@@ -99,11 +115,24 @@ impl ObjectPipeline {
             entries.iter().collect()
         };
 
+        // Build fid → LocationId map for parent_id resolution.
+        // This maps each entry's fid to the deterministic LocationId so we can
+        // resolve parent_fid → parent LocationId across the entire batch.
+        let fid_to_location_id: HashMap<u64, String> = entries
+            .iter()
+            .map(|e| {
+                let loc_id = location_id_for_entry(&self.config.volume_id, &e.full_path);
+                (e.fid, loc_id)
+            })
+            .collect();
+
         // Process in batches to limit memory and transaction size.
         let mut total_hashed = 0usize;
         let mut total_cached = 0usize;
         let mut total_skipped = 0usize;
         let mut total_errors = 0usize;
+        let mut total_directories = 0usize;
+        let mut total_zero_byte = 0usize;
 
         let num_batches = working_entries.len().div_ceil(self.config.batch_size);
         tracing::info!(
@@ -122,6 +151,15 @@ impl ObjectPipeline {
 
             // Collect owned entries for the hasher (it expects a slice of IndexEntry).
             let chunk_owned: Vec<IndexEntry> = chunk.iter().map(|e| (*e).clone()).collect();
+
+            // Count per-kind entries in this chunk.
+            for e in &chunk_owned {
+                if e.is_dir {
+                    total_directories += 1;
+                } else if e.size == 0 {
+                    total_zero_byte += 1;
+                }
+            }
 
             // Hash the batch.
             let hash_result = hash_entries_batch(&chunk_owned, &self.cache, &self.config.volume_id);
@@ -162,6 +200,13 @@ impl ObjectPipeline {
                     .extension()
                     .map(|e| e.to_string_lossy().to_string());
 
+                // Resolve parent_id: look up parent_fid in the fid→LocationId map.
+                let parent_id = if entry.parent_fid == NO_PARENT_FID {
+                    None
+                } else {
+                    fid_to_location_id.get(&entry.parent_fid).cloned()
+                };
+
                 location_rows.push(LocationRow {
                     id: location_id,
                     object_id: object_id_hex,
@@ -169,13 +214,14 @@ impl ObjectPipeline {
                     path: entry.full_path.to_string_lossy().to_string(),
                     name: entry.name_lossy.clone(),
                     extension,
-                    parent_id: None, // FIXME(phase-9): build parent chain from fid/parent_fid
+                    parent_id,
                     is_directory: entry.is_dir,
                     size_bytes: i64::try_from(entry.size).unwrap_or(i64::MAX),
                     allocated_bytes: i64::try_from(entry.allocated_size).unwrap_or(i64::MAX),
                     created_at: now.clone(),
                     modified_at: entry.modified_at.format("%Y-%m-%d %H:%M:%S").to_string(),
                     accessed_at: None,
+                    fid: i64::try_from(entry.fid).ok(),
                 });
             }
 
@@ -194,6 +240,8 @@ impl ObjectPipeline {
             cached: total_cached,
             skipped: total_skipped,
             errors: total_errors,
+            directories: total_directories,
+            zero_byte: total_zero_byte,
             elapsed: start.elapsed(),
         };
 
@@ -330,9 +378,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_entry(path: PathBuf, size: u64, is_dir: bool) -> IndexEntry {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_FID: AtomicU64 = AtomicU64::new(1000);
         IndexEntry {
-            fid: 1000 + size,
-            parent_fid: 0,
+            fid: NEXT_FID.fetch_add(1, Ordering::Relaxed),
+            parent_fid: NO_PARENT_FID,
             name: OsString::from(path.file_name().unwrap_or_default()),
             name_lossy: path
                 .file_name()

@@ -70,6 +70,7 @@ impl Default for UndoStack {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -45,7 +45,11 @@ impl CapabilityToken {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        // HMAC-SHA256 accepts any key length; this only fails on zero-length keys
+        // which would be a programming error in the caller.
+        let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+            return false;
+        };
 
         // Feed deterministic token fields into the MAC
         mac.update(self.nonce.as_bytes());
@@ -69,7 +73,11 @@ impl CapabilityToken {
 
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+        // HMAC-SHA256 accepts any key length; this only fails on zero-length keys
+        // which would be a programming error in the caller.
+        let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+            return;
+        };
 
         mac.update(self.nonce.as_bytes());
         mac.update(self.device_id.to_string().as_bytes());
@@ -131,6 +139,7 @@ impl RevocationList {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

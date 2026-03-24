@@ -54,6 +54,10 @@ jobs:
       - name: Test (nextest)
         run: cargo nextest run --workspace
 
+      - name: Test ignored (Linux platform tests)
+        if: runner.os == 'Linux'
+        run: cargo nextest run --workspace -E 'test(/linux/)' --run-ignored ignored-only || true
+
       - name: Build daemon
         run: cargo build -p hyprdrive-daemon
 

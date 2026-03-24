@@ -22,8 +22,8 @@ const INODE_CACHE: TableDefinition<&str, &str> = TableDefinition::new("inode_cac
 const THUMB_MANIFEST: TableDefinition<&str, &str> = TableDefinition::new("thumb_manifest");
 
 /// Query cache: key = query_hash, value = serialized result
-#[allow(dead_code)] // Used in Phase 9 (CQRS query caching)
-const QUERY_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("query_cache");
+/// Reserved for Phase 9 (CQRS query caching).
+const _QUERY_CACHE: TableDefinition<&str, &[u8]> = TableDefinition::new("query_cache");
 
 /// Transfer checkpoints: key = transfer_id, value = JSON checkpoint
 const XFER_CHECKPOINTS: TableDefinition<&str, &str> = TableDefinition::new("xfer_checkpoints");
@@ -342,6 +342,7 @@ pub mod dir_size {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

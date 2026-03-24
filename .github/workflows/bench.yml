@@ -39,7 +39,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: target/criterion-baseline
-          key: bench-baseline-${{ github.base_ref || 'master' }}
+          key: bench-baseline-master
+          restore-keys: |
+            bench-baseline-
 
       - name: Run benchmarks
         run: |

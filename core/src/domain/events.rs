@@ -33,6 +33,10 @@ pub struct PipelineBatchComplete {
     pub skipped: usize,
     /// Number of individual file errors.
     pub errors: usize,
+    /// Number of directory entries (synthetic ObjectIds).
+    pub directories: usize,
+    /// Number of zero-byte file entries.
+    pub zero_byte: usize,
     /// Wall-clock time for the batch.
     #[serde(with = "duration_millis")]
     pub elapsed: Duration,
@@ -54,6 +58,7 @@ mod duration_millis {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -79,6 +84,8 @@ mod tests {
             cached: 940,
             skipped: 10,
             errors: 3,
+            directories: 100,
+            zero_byte: 5,
             elapsed: Duration::from_millis(1234),
         };
         let json = serde_json::to_string(&event).expect("serialize");
@@ -86,6 +93,8 @@ mod tests {
         assert_eq!(back.total, 1000);
         assert_eq!(back.hashed, 50);
         assert_eq!(back.cached, 940);
+        assert_eq!(back.directories, 100);
+        assert_eq!(back.zero_byte, 5);
         assert_eq!(back.elapsed, Duration::from_millis(1234));
     }
 
@@ -105,6 +114,8 @@ mod tests {
             cached: 0,
             skipped: 0,
             errors: 0,
+            directories: 0,
+            zero_byte: 0,
             elapsed: Duration::ZERO,
         };
         let _cloned = batch.clone();

@@ -4,15 +4,7 @@
 //! domain models, operations (CQRS), infrastructure (DB, events, jobs),
 //! and high-level services (sync, network, media processing).
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::todo,
-    clippy::dbg_macro,
-    missing_docs,
-    unsafe_code
-)]
+#![allow(missing_docs)]
 
 pub mod db;
 pub mod domain;

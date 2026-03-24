@@ -19,10 +19,14 @@
 
 #![allow(missing_docs)]
 
+pub mod change_processor;
 pub mod error;
 pub mod hasher;
 pub mod pipeline;
 
+pub use change_processor::{ChangeProcessor, ChangeStats};
 pub use error::{PipelineError, PipelineResult};
 pub use hasher::hash_file;
-pub use pipeline::{location_id_for_entry, mime_from_extension, ObjectPipeline, PipelineConfig};
+pub use pipeline::{
+    location_id_for_entry, mime_from_extension, ObjectPipeline, PipelineConfig, NO_PARENT_FID,
+};
