@@ -274,7 +274,10 @@ mod tests {
     fn test_coalesce_create_delete_cancel() {
         let changes = vec![
             FsChange::Created(make_entry(42)),
-            FsChange::Deleted { fid: 42, path: None },
+            FsChange::Deleted {
+                fid: 42,
+                path: None,
+            },
         ];
         let result = coalesce_changes(changes);
         assert!(result.is_empty(), "Created+Deleted same fid should cancel");
@@ -283,7 +286,10 @@ mod tests {
     #[test]
     fn test_coalesce_delete_create_becomes_modified() {
         let changes = vec![
-            FsChange::Deleted { fid: 42, path: None },
+            FsChange::Deleted {
+                fid: 42,
+                path: None,
+            },
             FsChange::Created(make_entry(42)),
         ];
         let result = coalesce_changes(changes);
@@ -342,7 +348,10 @@ mod tests {
         // Created→Deleted→Created for same fid: first pair cancels, second Created survives.
         let changes = vec![
             FsChange::Created(make_entry(42)),
-            FsChange::Deleted { fid: 42, path: None },
+            FsChange::Deleted {
+                fid: 42,
+                path: None,
+            },
             FsChange::Created(make_entry(42)),
         ];
         let result = coalesce_changes(changes);

@@ -168,12 +168,8 @@ impl ChangeProcessor {
             if deleted_object_id.is_none() {
                 if let Some(ref p) = path {
                     let path_str = p.to_string_lossy();
-                    match queries::delete_location_by_path(
-                        &self.pool,
-                        &self.volume_id,
-                        &path_str,
-                    )
-                    .await
+                    match queries::delete_location_by_path(&self.pool, &self.volume_id, &path_str)
+                        .await
                     {
                         Ok(Some(object_id)) => {
                             deleted_object_id = Some(object_id);
