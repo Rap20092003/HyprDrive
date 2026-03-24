@@ -6,6 +6,7 @@ use crate::error::{FsIndexerError, FsIndexerResult};
 use crate::platform::windows::{detect, enrich, mft, usn};
 use crate::types::{FilesystemKind, IndexEntry, ScanResult};
 use chrono::Utc;
+use std::ffi::OsString;
 use std::path::Path;
 
 /// Minimum synthetic FID for jwalk entries (avoids collision with NTFS FRNs).
@@ -40,7 +41,12 @@ fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<Sc
     tracing::info!(entries = topo_count, "topology pass complete");
 
     // Build parent map for path reconstruction
-    let parent_map = mft::build_parent_map(&topo_entries);
+    let mut parent_map = mft::build_parent_map(&topo_entries);
+    // NTFS root directory (FRN 5) is excluded by the MIN_USER_FRN filter
+    // in mft_enumerate_topology(), but every path chain terminates at it.
+    // Insert as a self-referencing root with empty name so
+    // reconstruct_path_memo() resolves it to the volume root path.
+    parent_map.insert(mft::NTFS_ROOT_FRN, (mft::NTFS_ROOT_FRN, OsString::new()));
 
     // Phase 2: Convert to IndexEntry with paths, then enrich sizes
     // Use memoized path reconstruction — much faster for large trees because
@@ -48,29 +54,33 @@ fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<Sc
     let fids: Vec<u64> = topo_entries.iter().map(|t| t.fid).collect();
     let path_cache = mft::reconstruct_paths_cached(&fids, &parent_map, volume);
 
-    let mut entries: Vec<IndexEntry> = topo_entries
-        .into_iter()
-        .map(|topo| {
-            let full_path = path_cache
-                .get(&topo.fid)
-                .cloned()
-                .unwrap_or_else(|| volume.join(topo.name.clone()));
-            let name_lossy = topo.name.to_string_lossy().to_string();
-
-            IndexEntry {
-                fid: topo.fid,
-                parent_fid: topo.parent_fid,
-                name: topo.name,
-                name_lossy,
-                full_path,
-                size: 0,           // filled by enrichment
-                allocated_size: 0, // filled by enrichment
-                is_dir: topo.is_dir,
-                modified_at: Utc::now(), // updated during enrichment if possible
-                attributes: topo.attributes,
+    let mut entries: Vec<IndexEntry> = Vec::with_capacity(topo_entries.len());
+    let mut orphan_count = 0u64;
+    for topo in topo_entries {
+        let full_path = match path_cache.get(&topo.fid) {
+            Some(p) => p.clone(),
+            None => {
+                orphan_count += 1;
+                continue;
             }
-        })
-        .collect();
+        };
+        let name_lossy = topo.name.to_string_lossy().to_string();
+        entries.push(IndexEntry {
+            fid: topo.fid,
+            parent_fid: topo.parent_fid,
+            name: topo.name,
+            name_lossy,
+            full_path,
+            size: 0,           // filled by enrichment
+            allocated_size: 0, // filled by enrichment
+            is_dir: topo.is_dir,
+            modified_at: Utc::now(), // updated during enrichment if possible
+            attributes: topo.attributes,
+        });
+    }
+    if orphan_count > 0 {
+        tracing::info!(orphan_count, "skipped entries with unresolvable paths");
+    }
 
     // Phase 3: Size enrichment
     let enrich_stats = enrich::enrich_sizes(&mut entries)?;
@@ -299,6 +309,39 @@ mod tests {
             scan.entries.len() >= 10,
             "expected >= 10 entries, got {}",
             scan.entries.len()
+        );
+    }
+
+    /// Requires admin privileges on a real NTFS volume.
+    /// Run: `cargo test -p hyprdrive-fs-indexer -- --ignored full_scan_enrichment_check`
+    #[test]
+    #[ignore]
+    fn full_scan_enrichment_check() {
+        let result = full_scan(Path::new("C:\\")).expect("full_scan should succeed as admin");
+        let total = result.entries.len();
+        let files = result.entries.iter().filter(|e| !e.is_dir).count();
+        let with_size = result
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir && e.size > 0)
+            .count();
+        let deep_paths = result
+            .entries
+            .iter()
+            .filter(|e| e.full_path.components().count() > 3)
+            .count();
+
+        println!(
+            "Total: {total}, Files: {files}, With size: {with_size}, Deep paths: {deep_paths}"
+        );
+
+        assert!(
+            with_size > files / 2,
+            "expected >50% of files to have size, got {with_size}/{files}"
+        );
+        assert!(
+            deep_paths > total / 2,
+            "expected >50% of entries with depth > 3, got {deep_paths}/{total}"
         );
     }
 }

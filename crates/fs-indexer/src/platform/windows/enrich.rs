@@ -13,6 +13,12 @@ pub struct EnrichStats {
     pub enriched: u64,
     /// Number of entries skipped (access denied, locked, etc.).
     pub skipped: u64,
+    /// Subset of skipped: access denied (0x80070005).
+    pub access_denied: u64,
+    /// Subset of skipped: file/path not found (0x80070002, 0x80070003).
+    pub not_found: u64,
+    /// Subset of skipped: other errors.
+    pub other_errors: u64,
 }
 
 /// Batch size for handle operations to avoid handle exhaustion.
@@ -55,6 +61,9 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
     let total = entries.len();
     let mut enriched = 0u64;
     let mut skipped = 0u64;
+    let mut access_denied = 0u64;
+    let mut not_found = 0u64;
+    let mut other_errors = 0u64;
 
     for chunk in entries.chunks_mut(ENRICH_BATCH_SIZE) {
         for entry in chunk.iter_mut() {
@@ -87,10 +96,16 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
             let handle = match handle_result {
                 Ok(h) => SafeHandle(h),
                 Err(e) => {
-                    tracing::warn!(
+                    let code = e.code().0 as u32;
+                    match code {
+                        0x80070005 => access_denied += 1,
+                        0x80070002 | 0x80070003 => not_found += 1,
+                        _ => other_errors += 1,
+                    }
+                    tracing::trace!(
                         path = %entry.full_path.display(),
                         error = %e,
-                        "access denied during size enrichment, defaulting to size=0"
+                        "size enrichment failed, defaulting to size=0"
                     );
                     skipped += 1;
                     continue;
@@ -114,7 +129,8 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
                 entry.allocated_size = file_info.AllocationSize.max(0) as u64;
                 enriched += 1;
             } else {
-                tracing::warn!(
+                other_errors += 1;
+                tracing::trace!(
                     path = %entry.full_path.display(),
                     "GetFileInformationByHandleEx failed, defaulting to size=0"
                 );
@@ -124,9 +140,23 @@ pub fn enrich_sizes(entries: &mut [IndexEntry]) -> FsIndexerResult<EnrichStats> 
         }
     }
 
-    tracing::info!(total, enriched, skipped, "size enrichment complete");
+    tracing::info!(
+        total,
+        enriched,
+        skipped,
+        access_denied,
+        not_found,
+        other_errors,
+        "size enrichment complete"
+    );
 
-    Ok(EnrichStats { enriched, skipped })
+    Ok(EnrichStats {
+        enriched,
+        skipped,
+        access_denied,
+        not_found,
+        other_errors,
+    })
 }
 
 #[cfg(test)]
