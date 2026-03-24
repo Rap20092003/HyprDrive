@@ -12,6 +12,7 @@
     missing_docs
 )]
 
+#[cfg(target_os = "windows")]
 mod cursor_store;
 mod watcher;
 
