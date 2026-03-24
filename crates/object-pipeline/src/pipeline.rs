@@ -39,7 +39,7 @@ impl PipelineConfig {
     pub fn new(volume_id: String) -> Self {
         Self {
             volume_id,
-            batch_size: 5000,
+            batch_size: 20_000,
             skip_directories: false,
             mime_detection: true,
         }
@@ -120,9 +120,9 @@ impl ObjectPipeline {
         // multiple batches (MFT order is arbitrary, not tree-order).
         working_entries.sort_by_key(|e| e.full_path.components().count());
 
-        // Build fid → LocationId map for parent_id resolution.
-        // This maps each entry's fid to the deterministic LocationId so we can
-        // resolve parent_fid → parent LocationId across the entire batch.
+        // Build fid → LocationId map AND fid → LocationId cache for reuse.
+        // location_id_for_entry() is a BLAKE3 hash — computing it once here
+        // and reusing it in the inner loop avoids 847K redundant hashes.
         let fid_to_location_id: HashMap<u64, String> = entries
             .iter()
             .map(|e| {
@@ -199,7 +199,13 @@ impl ObjectPipeline {
                     updated_at: now.clone(),
                 });
 
-                let location_id = location_id_for_entry(&self.config.volume_id, &entry.full_path);
+                // Reuse cached location_id instead of re-computing BLAKE3 hash.
+                let location_id = fid_to_location_id
+                    .get(&entry.fid)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        location_id_for_entry(&self.config.volume_id, &entry.full_path)
+                    });
                 let extension = entry
                     .full_path
                     .extension()
