@@ -4,6 +4,10 @@
 //! This module collects events over a debounce window, deduplicates them via
 //! `coalesce_changes`, then dispatches the batch to the ChangeProcessor.
 
+// Currently only wired on Windows (main.rs cfg(windows) block).
+// Will be used on Linux/macOS once their listeners are implemented.
+#![cfg_attr(not(target_os = "windows"), allow(dead_code))]
+
 use hyprdrive_fs_indexer::FsChange;
 use hyprdrive_object_pipeline::ChangeProcessor;
 use std::collections::HashMap;

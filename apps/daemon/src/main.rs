@@ -25,6 +25,7 @@ const DEFAULT_SCAN_ROOT: &str = "C:\\";
 
 /// Derive a volume ID from a scan root path (e.g. "C" from "C:\").
 /// Returns None if the path is empty or invalid, forcing callers to handle the error.
+#[cfg(target_os = "windows")]
 fn derive_volume_id(scan_root: &std::path::Path) -> String {
     let lossy = scan_root.to_string_lossy();
     match lossy.chars().next() {
@@ -107,6 +108,7 @@ async fn main() -> Result<()> {
     info!("database ready");
 
     let cache_path = data_dir.join("cache.redb");
+    #[allow(unused_variables)]
     let cache = Arc::new(
         hyprdrive_core::db::cache::open_cache(&cache_path).context("failed to open redb cache")?,
     );
