@@ -77,14 +77,14 @@ impl ChangeProcessor {
 
         // Partition changes into buckets.
         let mut creates: Vec<IndexEntry> = Vec::new();
-        let mut deletes: Vec<u64> = Vec::new();
+        let mut deletes: Vec<(u64, Option<PathBuf>)> = Vec::new();
         let mut moves: Vec<(u64, u64, std::ffi::OsString)> = Vec::new();
         let mut modifies: Vec<(u64, u64)> = Vec::new();
 
         for change in changes {
             match change {
                 FsChange::Created(entry) => creates.push(entry),
-                FsChange::Deleted { fid } => deletes.push(fid),
+                FsChange::Deleted { fid, path } => deletes.push((fid, path)),
                 FsChange::Moved {
                     fid,
                     new_parent_fid,
@@ -146,31 +146,54 @@ impl ChangeProcessor {
 
         // ── Process Deletes ──
         let mut orphan_candidates: Vec<String> = Vec::new();
-        for fid in &deletes {
-            let fid_i64 = match i64::try_from(*fid) {
-                Ok(v) => v,
-                Err(_) => {
-                    tracing::warn!(fid, "delete: fid exceeds i64::MAX, skipping");
-                    stats.errors += 1;
-                    continue;
+        for (fid, path) in &deletes {
+            // Try fid-based deletion first (works on Windows where fid = file reference number).
+            let mut deleted_object_id: Option<String> = None;
+
+            if let Ok(fid_i64) = i64::try_from(*fid) {
+                match queries::delete_location_by_fid(&self.pool, &self.volume_id, fid_i64).await {
+                    Ok(Some(object_id)) => {
+                        deleted_object_id = Some(object_id);
+                    }
+                    Ok(None) => {} // Not found by fid — try path fallback below
+                    Err(e) => {
+                        tracing::error!(fid, error = %e, "failed to delete location by fid");
+                        stats.errors += 1;
+                        continue;
+                    }
                 }
-            };
-            match queries::delete_location_by_fid(&self.pool, &self.volume_id, fid_i64).await {
-                Ok(Some(object_id)) => {
-                    stats.deleted += 1;
-                    orphan_candidates.push(object_id);
-                    // Remove from fid_map.
-                    let mut map = self.fid_map.write().expect("fid_map write lock");
-                    map.remove(fid);
+            }
+
+            // Fallback: path-based deletion (Linux where fid is a hash, not a real inode).
+            if deleted_object_id.is_none() {
+                if let Some(ref p) = path {
+                    let path_str = p.to_string_lossy();
+                    match queries::delete_location_by_path(&self.pool, &self.volume_id, &path_str)
+                        .await
+                    {
+                        Ok(Some(object_id)) => {
+                            deleted_object_id = Some(object_id);
+                        }
+                        Ok(None) => {
+                            tracing::debug!(fid, path = %path_str, "delete: location not found by fid or path");
+                        }
+                        Err(e) => {
+                            tracing::error!(fid, path = %path_str, error = %e, "failed to delete location by path");
+                            stats.errors += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::debug!(fid, "delete: location not found by fid (no path fallback)");
                 }
-                Ok(None) => {
-                    // Location not found — already deleted or fid mismatch.
-                    tracing::debug!(fid, "delete: location not found");
-                }
-                Err(e) => {
-                    tracing::error!(fid, error = %e, "failed to delete location");
-                    stats.errors += 1;
-                }
+            }
+
+            if let Some(object_id) = deleted_object_id {
+                stats.deleted += 1;
+                orphan_candidates.push(object_id);
+                // Remove from fid_map.
+                let mut map = self.fid_map.write().expect("fid_map write lock");
+                map.remove(fid);
             }
         }
 

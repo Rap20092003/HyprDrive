@@ -129,7 +129,7 @@ pub fn poll_changes(
                 attributes: record.file_attributes,
             }));
         } else if (reason & USN_REASON_FILE_DELETE) != 0 {
-            changes.push(FsChange::Deleted { fid });
+            changes.push(FsChange::Deleted { fid, path: None });
         } else if (reason & USN_REASON_RENAME_NEW_NAME) != 0 {
             changes.push(FsChange::Moved {
                 fid,

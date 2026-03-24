@@ -309,9 +309,17 @@ async fn event_loop(
 
             // DELETE
             if event.mask.contains(EventMask::DELETE) {
-                // We can't stat a deleted file, so use a hash-based fid
+                // We can't stat a deleted file, so use a hash-based fid.
+                // Also include the path so ChangeProcessor can fall back to path-based deletion.
                 let fid = fid_from_path(&full_path);
-                if tx.send(FsChange::Deleted { fid }).await.is_err() {
+                if tx
+                    .send(FsChange::Deleted {
+                        fid,
+                        path: Some(full_path.clone()),
+                    })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -406,8 +414,15 @@ async fn event_loop(
             .map(|(cookie, _)| *cookie)
             .collect();
         for cookie in expired {
-            if let Some((fid, _path, _name, _ts)) = move_buffer.remove(&cookie) {
-                if tx.send(FsChange::Deleted { fid }).await.is_err() {
+            if let Some((fid, old_path, _name, _ts)) = move_buffer.remove(&cookie) {
+                if tx
+                    .send(FsChange::Deleted {
+                        fid,
+                        path: Some(old_path),
+                    })
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -427,7 +442,8 @@ fn fid_from_path(path: &Path) -> u64 {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
     }
-    hash
+    // Mask to 63 bits so the fid fits in SQLite's i64 column without overflow.
+    hash & 0x7FFF_FFFF_FFFF_FFFF
 }
 
 #[cfg(test)]

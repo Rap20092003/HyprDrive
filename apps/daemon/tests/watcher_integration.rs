@@ -109,7 +109,10 @@ async fn test_change_processor_deleted_e2e() {
     processor.seed_fid_map(&[entry]);
 
     let stats = processor
-        .process_changes(vec![FsChange::Deleted { fid: 100 }])
+        .process_changes(vec![FsChange::Deleted {
+            fid: 100,
+            path: None,
+        }])
         .await
         .expect("process");
 
