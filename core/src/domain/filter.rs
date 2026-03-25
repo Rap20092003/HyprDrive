@@ -110,12 +110,12 @@ impl FilterExpr {
                 // Clamp to i64::MAX to avoid wrapping u64::MAX → -1
                 params.push(SqlParam::Int((*min).min(i64::MAX as u64) as i64));
                 params.push(SqlParam::Int((*max).min(i64::MAX as u64) as i64));
-                "l.size BETWEEN ? AND ?".to_string()
+                "l.size_bytes BETWEEN ? AND ?".to_string()
             }
             Self::AllocatedRange { min, max } => {
                 params.push(SqlParam::Int((*min).min(i64::MAX as u64) as i64));
                 params.push(SqlParam::Int((*max).min(i64::MAX as u64) as i64));
-                "l.allocated_size BETWEEN ? AND ?".to_string()
+                "l.allocated_bytes BETWEEN ? AND ?".to_string()
             }
             Self::DateRange { start, end } => {
                 params.push(SqlParam::Text(start.to_rfc3339()));
@@ -133,13 +133,13 @@ impl FilterExpr {
             }
             Self::IsWasteful(threshold) => {
                 params.push(SqlParam::Float(*threshold));
-                "CAST(l.allocated_size AS REAL) / MAX(l.size, 1) > ?".to_string()
+                "CAST(l.allocated_bytes AS REAL) / MAX(l.size_bytes, 1) > ?".to_string()
             }
             Self::IsBuildArtifact => {
-                "(l.materialized_path LIKE '%/node_modules/%' OR l.materialized_path LIKE '%/target/%' OR l.materialized_path LIKE '%/__pycache__/%' OR l.materialized_path LIKE '%/.git/objects/%' OR l.materialized_path LIKE '%/dist/%')".to_string()
+                "(l.path LIKE '%/node_modules/%' OR l.path LIKE '%/target/%' OR l.path LIKE '%/__pycache__/%' OR l.path LIKE '%/.git/objects/%' OR l.path LIKE '%/dist/%')".to_string()
             }
             Self::Duplicate => {
-                "o.content_hash IN (SELECT content_hash FROM objects GROUP BY content_hash HAVING COUNT(*) > 1)".to_string()
+                "o.id IN (SELECT object_id FROM locations GROUP BY object_id HAVING COUNT(*) > 1)".to_string()
             }
         }
     }
@@ -160,7 +160,7 @@ mod tests {
             },
         ]);
         let (sql, params) = expr.compile_to_sql();
-        assert_eq!(sql, "(l.category = ? AND l.size BETWEEN ? AND ?)");
+        assert_eq!(sql, "(l.category = ? AND l.size_bytes BETWEEN ? AND ?)");
         assert_eq!(params.len(), 3);
     }
 
@@ -202,7 +202,7 @@ mod tests {
             max: 10_737_418_240, // 10 GB
         };
         let (sql, params) = expr.compile_to_sql();
-        assert_eq!(sql, "l.size BETWEEN ? AND ?");
+        assert_eq!(sql, "l.size_bytes BETWEEN ? AND ?");
         assert_eq!(params[0], SqlParam::Int(1_073_741_824));
         assert_eq!(params[1], SqlParam::Int(10_737_418_240));
     }
@@ -214,7 +214,7 @@ mod tests {
             max: u64::MAX,
         };
         let (sql, params) = expr.compile_to_sql();
-        assert_eq!(sql, "l.allocated_size BETWEEN ? AND ?");
+        assert_eq!(sql, "l.allocated_bytes BETWEEN ? AND ?");
         assert_eq!(params.len(), 2);
     }
 
@@ -230,7 +230,7 @@ mod tests {
     fn is_wasteful() {
         let expr = FilterExpr::IsWasteful(0.5);
         let (sql, params) = expr.compile_to_sql();
-        assert!(sql.contains("CAST(l.allocated_size AS REAL)"));
+        assert!(sql.contains("l.allocated_bytes"));
         assert_eq!(params[0], SqlParam::Float(0.5));
     }
 
