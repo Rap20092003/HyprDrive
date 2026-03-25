@@ -32,6 +32,9 @@ pub struct PipelineConfig {
     pub skip_directories: bool,
     /// Whether to detect MIME types from file extensions.
     pub mime_detection: bool,
+    /// When true, cache misses get synthetic ObjectIds instead of being hashed from disk.
+    /// A background worker upgrades them to real BLAKE3 hashes later.
+    pub defer_content_hashing: bool,
 }
 
 impl PipelineConfig {
@@ -42,6 +45,7 @@ impl PipelineConfig {
             batch_size: 20_000,
             skip_directories: false,
             mime_detection: true,
+            defer_content_hashing: false,
         }
     }
 }
@@ -100,6 +104,7 @@ impl ObjectPipeline {
                 total: 0,
                 hashed: 0,
                 cached: 0,
+                deferred: 0,
                 skipped: 0,
                 errors: 0,
                 directories: 0,
@@ -138,6 +143,7 @@ impl ObjectPipeline {
         let mut total_errors = 0usize;
         let mut total_directories = 0usize;
         let mut total_zero_byte = 0usize;
+        let mut total_deferred = 0usize;
 
         let num_batches = working_entries.len().div_ceil(self.config.batch_size);
         tracing::info!(
@@ -168,12 +174,18 @@ impl ObjectPipeline {
             }
 
             // Hash the batch.
-            let hash_result = hash_entries_batch(&chunk_owned, &self.cache, &self.config.volume_id);
+            let hash_result = hash_entries_batch(
+                &chunk_owned,
+                &self.cache,
+                &self.config.volume_id,
+                self.config.defer_content_hashing,
+            );
 
             total_hashed += hash_result.hashed;
             total_cached += hash_result.cache_hits;
             total_skipped += hash_result.skipped;
             total_errors += hash_result.errors.len();
+            total_deferred += hash_result.deferred;
 
             // Build ObjectRows and LocationRows from hash results.
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -198,6 +210,11 @@ impl ObjectPipeline {
                     size_bytes: i64::try_from(entry.size).unwrap_or(i64::MAX),
                     created_at: now.clone(),
                     updated_at: now.clone(),
+                    hash_state: if hr.synthetic && !entry.is_dir {
+                        "deferred".to_string()
+                    } else {
+                        "content".to_string()
+                    },
                 });
 
                 // Reuse cached location_id instead of re-computing BLAKE3 hash.
@@ -254,6 +271,7 @@ impl ObjectPipeline {
                 of = num_batches,
                 hashed = hash_result.hashed,
                 cached = hash_result.cache_hits,
+                deferred = hash_result.deferred,
                 skipped = hash_result.skipped,
                 elapsed_ms = batch_start.elapsed().as_millis() as u64,
                 "batch complete"
@@ -264,6 +282,7 @@ impl ObjectPipeline {
             total,
             hashed: total_hashed,
             cached: total_cached,
+            deferred: total_deferred,
             skipped: total_skipped,
             errors: total_errors,
             directories: total_directories,
@@ -275,6 +294,7 @@ impl ObjectPipeline {
             total = stats.total,
             hashed = stats.hashed,
             cached = stats.cached,
+            deferred = stats.deferred,
             skipped = stats.skipped,
             elapsed_ms = stats.elapsed.as_millis() as u64,
             "pipeline batch complete"
@@ -603,5 +623,55 @@ mod tests {
         assert_eq!(stats.total, 3);
         assert_eq!(stats.hashed, 1); // Only real.txt
         assert_eq!(stats.skipped, 1); // ghost.bin
+    }
+
+    #[tokio::test]
+    async fn pipeline_deferred_mode() {
+        let (pool, cache, dir) = setup().await;
+
+        // Create real files on disk
+        let f1 = dir.path().join("file1.txt");
+        let f2 = dir.path().join("file2.txt");
+        std::fs::write(&f1, b"content one").unwrap();
+        std::fs::write(&f2, b"content two").unwrap();
+
+        let entries = vec![
+            make_entry(f1, 11, false),
+            make_entry(f2, 11, false),
+            make_entry(dir.path().join("subdir"), 0, true),
+        ];
+
+        let mut config = PipelineConfig::new("vol_test".to_string());
+        config.defer_content_hashing = true;
+        let pipeline = ObjectPipeline::new(config, pool.clone(), cache);
+
+        let stats = pipeline.process_entries(&entries).await.unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.deferred, 2, "both files should be deferred");
+        assert_eq!(stats.hashed, 0, "no disk I/O hashing in deferred mode");
+        assert_eq!(stats.directories, 1);
+
+        // Verify objects are in DB with hash_state = 'deferred'
+        let deferred_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM objects WHERE hash_state = 'deferred'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(deferred_count.0, 2, "2 deferred objects in DB");
+
+        // Directory should have hash_state = 'content'
+        let content_count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM objects WHERE hash_state = 'content'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(content_count.0, 1, "directory has content hash_state");
+
+        // All 3 locations should exist
+        let loc_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM locations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(loc_count.0, 3);
     }
 }

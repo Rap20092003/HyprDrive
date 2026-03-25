@@ -22,6 +22,8 @@ pub struct ObjectRow {
     pub created_at: String,
     /// Last update timestamp
     pub updated_at: String,
+    /// Hash state: 'content' = real BLAKE3, 'deferred' = synthetic placeholder
+    pub hash_state: String,
 }
 
 /// A row from the `locations` table — where content lives.
@@ -165,6 +167,21 @@ pub struct WastedSpaceRow {
     pub wasted_bytes: i64,
     /// Waste ratio (allocated / max(logical, 1))
     pub waste_ratio: f64,
+}
+
+/// A deferred object pending real content hashing.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DeferredObjectRow {
+    /// Synthetic object_id (to be replaced)
+    pub object_id: String,
+    /// File path for reading content
+    pub path: String,
+    /// File size in bytes
+    pub size_bytes: i64,
+    /// File reference number for inode cache key
+    pub fid: Option<i64>,
+    /// Modified timestamp for inode cache key
+    pub modified_at: String,
 }
 
 /// A group of duplicate files sharing the same content hash.

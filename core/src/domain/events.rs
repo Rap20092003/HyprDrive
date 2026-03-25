@@ -29,6 +29,8 @@ pub struct PipelineBatchComplete {
     pub hashed: usize,
     /// Entries served from inode cache (cache hits).
     pub cached: usize,
+    /// Entries that got synthetic (deferred) ObjectIds.
+    pub deferred: usize,
     /// Entries skipped (errors, permissions, etc.).
     pub skipped: usize,
     /// Number of individual file errors.
@@ -82,6 +84,7 @@ mod tests {
             total: 1000,
             hashed: 50,
             cached: 940,
+            deferred: 0,
             skipped: 10,
             errors: 3,
             directories: 100,
@@ -112,6 +115,7 @@ mod tests {
             total: 0,
             hashed: 0,
             cached: 0,
+            deferred: 0,
             skipped: 0,
             errors: 0,
             directories: 0,

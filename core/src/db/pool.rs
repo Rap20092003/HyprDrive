@@ -65,6 +65,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         include_str!("../../migrations/009_fts.sql"),
         include_str!("../../migrations/010_fid_column.sql"),
         include_str!("../../migrations/011_cursor_store.sql"),
+        include_str!("../../migrations/012_hash_state.sql"),
     ];
 
     for (i, sql) in migrations.iter().enumerate() {
