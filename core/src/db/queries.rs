@@ -811,11 +811,14 @@ pub async fn fetch_deferred_batch(
     pool: &SqlitePool,
     limit: i64,
 ) -> Result<Vec<crate::db::types::DeferredObjectRow>, sqlx::Error> {
+    // H4: GROUP BY o.id to avoid returning duplicate rows when one deferred
+    // object has multiple locations, preventing wasted re-hashing.
     sqlx::query_as(
-        "SELECT o.id AS object_id, l.path, l.size_bytes, l.fid, l.modified_at
+        "SELECT o.id AS object_id, MIN(l.path) AS path, l.size_bytes, l.fid, l.modified_at
          FROM objects o
          JOIN locations l ON l.object_id = o.id
          WHERE o.hash_state = 'deferred' AND l.is_directory = 0
+         GROUP BY o.id
          LIMIT ?1",
     )
     .bind(limit)
@@ -828,25 +831,36 @@ pub async fn fetch_deferred_batch(
 /// Atomically: insert new object with real hash, re-point all locations,
 /// delete the old synthetic object. Uses a transaction so partial failures
 /// leave the DB consistent.
+///
+/// Returns `Ok(true)` if the upgrade succeeded, `Ok(false)` if the old object
+/// was already upgraded (no rows affected).
 pub async fn upgrade_deferred_object(
     pool: &SqlitePool,
     old_object_id: &str,
     new_object_id: &str,
-    hash_state: &str,
 ) -> Result<bool, sqlx::Error> {
+    // H5: Guard against degenerate case where synthetic == real hash.
+    // If old == new, the DELETE at the end would cascade-delete all locations.
+    if old_object_id == new_object_id {
+        tracing::warn!(
+            object_id = old_object_id,
+            "synthetic and real hash collided — skipping upgrade"
+        );
+        return Ok(false);
+    }
+
     let mut tx = pool.begin().await?;
 
-    // Insert or update the real content object
+    // Insert or update the real content object. hash_state is always 'content'.
     sqlx::query(
         "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at, hash_state)
-         SELECT ?1, kind, mime_type, size_bytes, created_at, datetime('now'), ?2
-         FROM objects WHERE id = ?3
+         SELECT ?1, kind, mime_type, size_bytes, created_at, datetime('now'), 'content'
+         FROM objects WHERE id = ?2
          ON CONFLICT(id) DO UPDATE SET
            hash_state = 'content',
            updated_at = datetime('now')",
     )
     .bind(new_object_id)
-    .bind(hash_state)
     .bind(old_object_id)
     .execute(&mut *tx)
     .await?;
@@ -1233,7 +1247,7 @@ mod tests {
             size_bytes: size,
             created_at: "2026-01-01 00:00:00".to_string(),
             updated_at: "2026-01-01 00:00:00".to_string(),
-            hash_state: "content".to_string(),
+            hash_state: crate::db::types::hash_state::CONTENT.to_string(),
         }
     }
 

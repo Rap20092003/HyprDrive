@@ -7,6 +7,15 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+/// Valid values for the `hash_state` column on the `objects` table.
+/// Use these constants instead of string literals to prevent typos.
+pub mod hash_state {
+    /// Object has a real BLAKE3 content hash.
+    pub const CONTENT: &str = "content";
+    /// Object has a synthetic placeholder hash (pending background hashing).
+    pub const DEFERRED: &str = "deferred";
+}
+
 /// A row from the `objects` table — content identity.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ObjectRow {

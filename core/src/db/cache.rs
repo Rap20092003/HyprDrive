@@ -80,8 +80,18 @@ pub mod inode {
     ///
     /// Stronger invalidation than [`cache_key`]: detects in-place overwrites
     /// where mtime is preserved but size changes (e.g. truncation).
+    /// Uses fixed-width numeric encoding to prevent ambiguity with
+    /// volume IDs containing `:`.
     pub fn cache_key_v2(volume_id: &str, inode: u64, mtime: i64, size: u64) -> String {
-        format!("{volume_id}:{inode}:{mtime}:{size}")
+        // Length-prefix the variable-length volume_id, then use fixed-width hex for numerics.
+        format!(
+            "v2:{}:{}:{:016x}:{:016x}:{:016x}",
+            volume_id.len(),
+            volume_id,
+            inode,
+            mtime as u64,
+            size
+        )
     }
 
     /// Insert an entry into the inode cache.
@@ -422,7 +432,11 @@ mod tests {
     #[test]
     fn test_cache_key_v2_format() {
         let key = inode::cache_key_v2("vol1", 12345, 1700000000, 4096);
-        assert_eq!(key, "vol1:12345:1700000000:4096");
+        // Length-prefixed volume_id + fixed-width hex for numerics.
+        assert_eq!(
+            key,
+            "v2:4:vol1:0000000000003039:000000006553f100:0000000000001000"
+        );
     }
 
     #[test]
