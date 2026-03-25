@@ -74,7 +74,8 @@ async fn run_full_scan(
         "volume scan complete"
     );
 
-    let config = hyprdrive_object_pipeline::PipelineConfig::new(volume_id);
+    let mut config = hyprdrive_object_pipeline::PipelineConfig::new(volume_id);
+    config.defer_content_hashing = true;
     let pipeline = hyprdrive_object_pipeline::ObjectPipeline::new_shared(
         config,
         pool.clone(),
@@ -116,6 +117,7 @@ async fn run_full_scan(
         total = stats.total,
         hashed = stats.hashed,
         cached = stats.cached,
+        deferred = stats.deferred,
         skipped = stats.skipped,
         errors = stats.errors,
         directories = stats.directories,
@@ -123,6 +125,14 @@ async fn run_full_scan(
         elapsed_ms = stats.elapsed.as_millis() as u64,
         "object pipeline complete"
     );
+
+    // Log pending deferred hash count.
+    let pending = hyprdrive_core::db::queries::pending_hash_count(pool)
+        .await
+        .unwrap_or(0);
+    if pending > 0 {
+        info!(pending, "deferred objects awaiting background hashing");
+    }
 
     Ok(result)
 }
@@ -312,6 +322,39 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Background hasher: upgrade deferred objects to real BLAKE3 hashes ──
+    let bg_cancel = tokio_util::sync::CancellationToken::new();
+    let pending = hyprdrive_core::db::queries::pending_hash_count(&pool)
+        .await
+        .unwrap_or(0);
+    let _bg_hasher_task: Option<tokio::task::JoinHandle<_>> = if pending > 0 {
+        info!(pending, "spawning background hasher");
+        #[cfg(target_os = "windows")]
+        let volume_id = derive_volume_id(std::path::Path::new(DEFAULT_SCAN_ROOT));
+        #[cfg(target_os = "linux")]
+        let volume_id = derive_volume_id(&default_scan_root());
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let volume_id = "unknown".to_string();
+
+        let bg_config = hyprdrive_object_pipeline::BackgroundHasherConfig::new(volume_id);
+        let bg_pool = pool.clone();
+        let bg_cache = Arc::clone(&cache);
+        let bg_token = bg_cancel.clone();
+        Some(tokio::spawn(async move {
+            let result = hyprdrive_object_pipeline::run_background_hasher(
+                bg_config, bg_pool, bg_cache, bg_token,
+            )
+            .await;
+            info!(
+                upgraded = result.upgraded,
+                errors = result.errors,
+                "background hasher finished"
+            );
+        }))
+    } else {
+        None
+    };
+
     // FIXME(phase-9): start EventBus (tokio::broadcast channel for domain events)
     // FIXME(phase-13): start Iroh P2P node for device sync
     // FIXME(phase-13): start Axum HTTP server on :7421 for UI/CLI clients
@@ -322,6 +365,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("Shutdown signal received.");
+                bg_cancel.cancel();
                 break;
             }
             result = rescan_rx.recv() => {

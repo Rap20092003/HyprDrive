@@ -25,6 +25,25 @@ pub fn hash_file(path: &Path) -> PipelineResult<ObjectId> {
     Ok(ObjectId::from_bytes(hash_bytes))
 }
 
+/// Generate a synthetic ObjectId from file metadata (no disk I/O).
+///
+/// Used in deferred-hashing mode: first scan gets synthetic IDs,
+/// background worker upgrades them to real BLAKE3 content hashes later.
+///
+/// The "deferred:" prefix makes collision with real content hashes cryptographically impossible.
+pub fn synthetic_file_object_id(volume_id: &str, fid: u64, mtime: i64, size: u64) -> ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"deferred:");
+    hasher.update(volume_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(&fid.to_le_bytes());
+    hasher.update(b":");
+    hasher.update(&mtime.to_le_bytes());
+    hasher.update(b":");
+    hasher.update(&size.to_le_bytes());
+    ObjectId::from_bytes(*hasher.finalize().as_bytes())
+}
+
 /// Result of hashing a single entry.
 #[derive(Debug)]
 pub struct HashResult {
@@ -52,6 +71,8 @@ pub struct BatchHashResult {
     pub cache_hits: usize,
     /// Number of files actually hashed (cache misses).
     pub hashed: usize,
+    /// Number of entries that got synthetic (deferred) ObjectIds.
+    pub deferred: usize,
     /// Number of entries skipped due to errors.
     pub skipped: usize,
     /// Indices of skipped entries and their error messages.
@@ -72,12 +93,14 @@ pub fn hash_entries_batch(
     entries: &[IndexEntry],
     cache: &Database,
     volume_id: &str,
+    defer: bool,
 ) -> BatchHashResult {
     if entries.is_empty() {
         return BatchHashResult {
             results: Vec::new(),
             cache_hits: 0,
             hashed: 0,
+            deferred: 0,
             skipped: 0,
             errors: Vec::new(),
         };
@@ -140,24 +163,35 @@ pub fn hash_entries_batch(
         }
     }
 
-    // Hash cache misses in parallel via rayon.
-    let hash_results: Vec<(usize, Result<ObjectId, String>)> = needs_hashing
+    // Hash cache misses in parallel via rayon (or generate synthetic IDs if deferred).
+    // Returns (index, Ok((object_id, is_deferred)) | Err(msg)).
+    #[allow(clippy::type_complexity)]
+    let hash_results: Vec<(usize, Result<(ObjectId, bool), String>)> = needs_hashing
         .par_iter()
         .map(|&i| {
             let entry = &entries[i];
             if entry.size == 0 {
                 // Zero-byte file — deterministic hash without file I/O.
-                return (i, Ok(ObjectId::from_blake3(&[])));
+                return (i, Ok((ObjectId::from_blake3(&[]), false)));
             }
             // Guard: skip entries that are actually directories despite is_dir=false
             // (e.g., symlinks to directories on Linux reported as files by jwalk).
             if entry.full_path.is_dir() {
                 return (i, Err("entry is a directory".to_string()));
             }
+            if defer {
+                // Deferred mode: synthetic ID from metadata, no disk I/O.
+                let id = synthetic_file_object_id(
+                    volume_id,
+                    entry.fid,
+                    entry.modified_at.timestamp(),
+                    entry.size,
+                );
+                return (i, Ok((id, true)));
+            }
             match hash_file(&entry.full_path) {
-                Ok(id) => (i, Ok(id)),
+                Ok(id) => (i, Ok((id, false))),
                 Err(e) => {
-                    // Check if it's a permission error or missing file.
                     let err_str = e.to_string();
                     tracing::trace!(
                         path = %entry.full_path.display(),
@@ -172,21 +206,27 @@ pub fn hash_entries_batch(
 
     // Collect results and new cache entries.
     let mut hashed = 0usize;
+    let mut deferred = 0usize;
     let mut skipped = 0usize;
     let mut errors = Vec::new();
     let mut new_cache_entries: Vec<(String, String)> = Vec::new();
 
     for (i, result) in hash_results {
         match result {
-            Ok(object_id) => {
-                hashed += 1;
-                new_cache_entries.push((cache_keys[i].clone(), object_id.to_string()));
+            Ok((object_id, is_deferred)) => {
+                if is_deferred {
+                    deferred += 1;
+                    // Don't write synthetic IDs to inode cache — they're not real hashes.
+                } else {
+                    hashed += 1;
+                    new_cache_entries.push((cache_keys[i].clone(), object_id.to_string()));
+                }
                 debug_assert!(results[i].is_err(), "slot {i} should be a placeholder");
                 results[i] = Ok(HashResult {
                     index: i,
                     object_id,
                     cached: false,
-                    synthetic: false,
+                    synthetic: is_deferred,
                 });
             }
             Err(err_msg) => {
@@ -215,6 +255,7 @@ pub fn hash_entries_batch(
         results: final_results,
         cache_hits,
         hashed,
+        deferred,
         skipped,
         errors,
     }
@@ -313,7 +354,7 @@ mod tests {
     #[test]
     fn batch_empty() {
         let (cache, _dir) = test_cache();
-        let result = hash_entries_batch(&[], &cache, "vol1");
+        let result = hash_entries_batch(&[], &cache, "vol1", false);
         assert!(result.results.is_empty());
         assert_eq!(result.cache_hits, 0);
         assert_eq!(result.hashed, 0);
@@ -323,7 +364,7 @@ mod tests {
     fn batch_directory_skips_io() {
         let (cache, _dir) = test_cache();
         let entries = vec![make_entry(PathBuf::from("/test/mydir"), 0, true)];
-        let result = hash_entries_batch(&entries, &cache, "vol1");
+        let result = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(result.results.len(), 1);
         assert!(result.results[0].synthetic);
         assert!(!result.results[0].cached);
@@ -340,13 +381,13 @@ mod tests {
         let entries = vec![make_entry(path.clone(), 5, false)];
 
         // First call: cache miss, hashes the file.
-        let r1 = hash_entries_batch(&entries, &cache, "vol1");
+        let r1 = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(r1.hashed, 1);
         assert_eq!(r1.cache_hits, 0);
         let first_id = r1.results[0].object_id;
 
         // Second call: cache hit, same ObjectId.
-        let r2 = hash_entries_batch(&entries, &cache, "vol1");
+        let r2 = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(r2.cache_hits, 1);
         assert_eq!(r2.hashed, 0);
         assert_eq!(r2.results[0].object_id, first_id);
@@ -360,13 +401,13 @@ mod tests {
         std::fs::write(&path, b"small").unwrap();
 
         let entry1 = make_entry(path.clone(), 5, false);
-        let r1 = hash_entries_batch(&[entry1], &cache, "vol1");
+        let r1 = hash_entries_batch(&[entry1], &cache, "vol1", false);
         let id1 = r1.results[0].object_id;
 
         // "Grow" the file and make a new entry with different size.
         std::fs::write(&path, b"much bigger content now").unwrap();
         let entry2 = make_entry(path.clone(), 22, false);
-        let r2 = hash_entries_batch(&[entry2], &cache, "vol1");
+        let r2 = hash_entries_batch(&[entry2], &cache, "vol1", false);
 
         // Should be a cache miss because size changed.
         assert_eq!(r2.hashed, 1);
@@ -381,7 +422,7 @@ mod tests {
         std::fs::write(&path, b"").unwrap();
 
         let entries = vec![make_entry(path, 0, false)];
-        let result = hash_entries_batch(&entries, &cache, "vol1");
+        let result = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].object_id, ObjectId::from_blake3(&[]));
     }
@@ -394,7 +435,7 @@ mod tests {
             100,
             false,
         )];
-        let result = hash_entries_batch(&entries, &cache, "vol1");
+        let result = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(result.skipped, 1);
         assert_eq!(result.errors.len(), 1);
     }
@@ -411,8 +452,119 @@ mod tests {
             make_entry(dir.path().to_path_buf(), 0, true),
             make_entry(file_path, 7, false),
         ];
-        let result = hash_entries_batch(&entries, &cache, "vol1");
+        let result = hash_entries_batch(&entries, &cache, "vol1", false);
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.hashed, 1); // Only the file.
+    }
+
+    // ═══ synthetic_file_object_id tests ═══
+
+    #[test]
+    fn synthetic_id_deterministic() {
+        let id1 = synthetic_file_object_id("vol1", 1000, 1700000000, 4096);
+        let id2 = synthetic_file_object_id("vol1", 1000, 1700000000, 4096);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn synthetic_id_unique_per_fid() {
+        let id1 = synthetic_file_object_id("vol1", 1000, 1700000000, 4096);
+        let id2 = synthetic_file_object_id("vol1", 1001, 1700000000, 4096);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn synthetic_id_unique_per_size() {
+        let id1 = synthetic_file_object_id("vol1", 1000, 1700000000, 4096);
+        let id2 = synthetic_file_object_id("vol1", 1000, 1700000000, 8192);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn synthetic_id_unique_per_mtime() {
+        let id1 = synthetic_file_object_id("vol1", 1000, 1700000000, 4096);
+        let id2 = synthetic_file_object_id("vol1", 1000, 1700000001, 4096);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn synthetic_id_differs_from_dir_synthetic() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"dir:");
+        hasher.update(b"/test/mydir");
+        let dir_id = ObjectId::from_bytes(*hasher.finalize().as_bytes());
+        let file_id = synthetic_file_object_id("vol1", 1000, 1700000000, 0);
+        assert_ne!(dir_id, file_id);
+    }
+
+    #[test]
+    fn synthetic_id_differs_from_content_hash() {
+        let content_id = ObjectId::from_blake3(b"hello world");
+        let synthetic_id = synthetic_file_object_id("vol1", 1000, 1700000000, 11);
+        assert_ne!(content_id, synthetic_id);
+    }
+
+    // ═══ deferred mode tests ═══
+
+    #[test]
+    fn batch_deferred_mode_skips_disk_io() {
+        let (cache, _cdir) = test_cache();
+        let entries = vec![make_entry(
+            PathBuf::from("/nonexistent/deferred_test.txt"),
+            4096,
+            false,
+        )];
+
+        // Non-deferred: should fail (file doesn't exist)
+        let r1 = hash_entries_batch(&entries, &cache, "vol1", false);
+        assert_eq!(r1.skipped, 1);
+        assert_eq!(r1.hashed, 0);
+        assert_eq!(r1.deferred, 0);
+
+        // Deferred: should succeed with synthetic ID
+        let r2 = hash_entries_batch(&entries, &cache, "vol1", true);
+        assert_eq!(r2.skipped, 0);
+        assert_eq!(r2.hashed, 0);
+        assert_eq!(r2.deferred, 1);
+        assert_eq!(r2.results.len(), 1);
+        assert!(r2.results[0].synthetic);
+    }
+
+    #[test]
+    fn batch_deferred_mode_still_uses_cache() {
+        let (cache, _cdir) = test_cache();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cached.txt");
+        std::fs::write(&path, b"content").unwrap();
+
+        let entries = vec![make_entry(path, 7, false)];
+
+        // First: non-deferred to populate the cache
+        let r1 = hash_entries_batch(&entries, &cache, "vol1", false);
+        assert_eq!(r1.hashed, 1);
+        let real_id = r1.results[0].object_id;
+
+        // Second: deferred mode — should still get cache hit with REAL hash
+        let r2 = hash_entries_batch(&entries, &cache, "vol1", true);
+        assert_eq!(r2.cache_hits, 1);
+        assert_eq!(r2.deferred, 0);
+        assert_eq!(r2.results[0].object_id, real_id);
+        assert!(!r2.results[0].synthetic);
+    }
+
+    #[test]
+    fn batch_deferred_zero_byte_still_real() {
+        let (cache, _cdir) = test_cache();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.txt");
+        std::fs::write(&path, b"").unwrap();
+
+        let entries = vec![make_entry(path, 0, false)];
+        let result = hash_entries_batch(&entries, &cache, "vol1", true);
+
+        // Zero-byte files always get a real hash (no I/O needed).
+        assert_eq!(result.deferred, 0);
+        assert_eq!(result.results[0].object_id, ObjectId::from_blake3(&[]));
+        assert!(!result.results[0].synthetic);
     }
 }

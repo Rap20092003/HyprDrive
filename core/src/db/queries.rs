@@ -125,12 +125,16 @@ pub async fn upsert_object(
     row: &crate::db::types::ObjectRow,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at, hash_state)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
            mime_type = COALESCE(excluded.mime_type, objects.mime_type),
            size_bytes = excluded.size_bytes,
-           updated_at = excluded.updated_at",
+           updated_at = excluded.updated_at,
+           hash_state = CASE
+             WHEN excluded.hash_state = 'content' THEN 'content'
+             ELSE objects.hash_state
+           END",
     )
     .bind(&row.id)
     .bind(&row.kind)
@@ -138,6 +142,7 @@ pub async fn upsert_object(
     .bind(row.size_bytes)
     .bind(&row.created_at)
     .bind(&row.updated_at)
+    .bind(&row.hash_state)
     .execute(pool)
     .await?;
     Ok(())
@@ -200,12 +205,16 @@ pub async fn upsert_objects_batch(
     let mut tx = pool.begin().await?;
     for row in rows {
         sqlx::query(
-            "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at, hash_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                mime_type = COALESCE(excluded.mime_type, objects.mime_type),
                size_bytes = excluded.size_bytes,
-               updated_at = excluded.updated_at",
+               updated_at = excluded.updated_at,
+               hash_state = CASE
+                 WHEN excluded.hash_state = 'content' THEN 'content'
+                 ELSE objects.hash_state
+               END",
         )
         .bind(&row.id)
         .bind(&row.kind)
@@ -213,6 +222,7 @@ pub async fn upsert_objects_batch(
         .bind(row.size_bytes)
         .bind(&row.created_at)
         .bind(&row.updated_at)
+        .bind(&row.hash_state)
         .execute(&mut *tx)
         .await?;
     }
@@ -755,6 +765,7 @@ pub async fn duplicates_report(
          FROM locations l
          JOIN objects o ON l.object_id = o.id
          WHERE l.volume_id = ?1 AND l.is_directory = 0 AND o.size_bytes > 0
+               AND o.hash_state = 'content'
          GROUP BY o.id
          HAVING COUNT(*) > 1
          ORDER BY wasted_bytes DESC
@@ -783,6 +794,78 @@ pub async fn duplicate_locations(
     .bind(object_id)
     .fetch_all(pool)
     .await
+}
+
+// ═══ Deferred hashing queries ═══
+
+/// Count objects still pending real content hashing.
+pub async fn pending_hash_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM objects WHERE hash_state = 'deferred'")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
+}
+
+/// Fetch a batch of deferred objects with their file paths for background hashing.
+pub async fn fetch_deferred_batch(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<crate::db::types::DeferredObjectRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT o.id AS object_id, l.path, l.size_bytes, l.fid, l.modified_at
+         FROM objects o
+         JOIN locations l ON l.object_id = o.id
+         WHERE o.hash_state = 'deferred' AND l.is_directory = 0
+         LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Upgrade a deferred object to its real content hash.
+///
+/// Atomically: insert new object with real hash, re-point all locations,
+/// delete the old synthetic object. Uses a transaction so partial failures
+/// leave the DB consistent.
+pub async fn upgrade_deferred_object(
+    pool: &SqlitePool,
+    old_object_id: &str,
+    new_object_id: &str,
+    hash_state: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // Insert or update the real content object
+    sqlx::query(
+        "INSERT INTO objects (id, kind, mime_type, size_bytes, created_at, updated_at, hash_state)
+         SELECT ?1, kind, mime_type, size_bytes, created_at, datetime('now'), ?2
+         FROM objects WHERE id = ?3
+         ON CONFLICT(id) DO UPDATE SET
+           hash_state = 'content',
+           updated_at = datetime('now')",
+    )
+    .bind(new_object_id)
+    .bind(hash_state)
+    .bind(old_object_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Re-point all locations from old synthetic ID to real content ID
+    sqlx::query("UPDATE locations SET object_id = ?1 WHERE object_id = ?2")
+        .bind(new_object_id)
+        .bind(old_object_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Delete the old synthetic object (now orphaned)
+    let result = sqlx::query("DELETE FROM objects WHERE id = ?1 AND hash_state = 'deferred'")
+        .bind(old_object_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected() > 0)
 }
 
 #[cfg(test)]
@@ -1150,6 +1233,7 @@ mod tests {
             size_bytes: size,
             created_at: "2026-01-01 00:00:00".to_string(),
             updated_at: "2026-01-01 00:00:00".to_string(),
+            hash_state: "content".to_string(),
         }
     }
 

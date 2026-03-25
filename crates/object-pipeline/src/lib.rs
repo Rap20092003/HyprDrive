@@ -19,11 +19,13 @@
 
 #![allow(missing_docs)]
 
+pub mod background_hasher;
 pub mod change_processor;
 pub mod error;
 pub mod hasher;
 pub mod pipeline;
 
+pub use background_hasher::{run_background_hasher, BackgroundHashResult, BackgroundHasherConfig};
 pub use change_processor::{ChangeProcessor, ChangeStats};
 pub use error::{PipelineError, PipelineResult};
 pub use hasher::hash_file;
