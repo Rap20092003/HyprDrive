@@ -41,8 +41,8 @@ pub struct BackgroundHashResult {
     pub upgraded: u64,
     /// Objects that failed to hash (file missing, permissions, etc.).
     pub errors: u64,
-    /// Objects where old_id == new_id (deferred hash happened to match — shouldn't occur).
-    pub unchanged: u64,
+    /// Objects already upgraded by another worker or skipped (old==new collision).
+    pub skipped: u64,
 }
 
 /// Run the background hasher until all deferred objects are upgraded or cancellation is requested.
@@ -61,7 +61,7 @@ pub async fn run_background_hasher(
 ) -> BackgroundHashResult {
     let mut total_upgraded = 0u64;
     let mut total_errors = 0u64;
-    let mut total_unchanged = 0u64;
+    let mut total_skipped: u64 = 0;
 
     tracing::info!(
         batch_size = config.batch_size,
@@ -104,52 +104,84 @@ pub async fn run_background_hasher(
 
             let path = Path::new(&row.path);
 
-            // Hash the file from disk.
-            let new_object_id = match crate::hasher::hash_file(path) {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::debug!(
-                        path = %row.path,
-                        error = %e,
-                        "background hash failed, skipping"
-                    );
-                    batch_errors += 1;
-                    continue;
-                }
-            };
-
-            let new_id_hex = new_object_id.to_string();
-
-            // Skip if the synthetic and real IDs somehow match (shouldn't happen due to "deferred:" prefix).
-            if new_id_hex == row.object_id {
-                total_unchanged += 1;
+            // M3: Validate path is absolute before reading from disk.
+            if !path.is_absolute() {
+                tracing::warn!(path = %row.path, "skipping non-absolute path in background hasher");
+                batch_errors += 1;
                 continue;
             }
 
+            // H2: Hash in spawn_blocking to avoid starving the tokio runtime.
+            let path_owned = path.to_path_buf();
+            let new_object_id =
+                match tokio::task::spawn_blocking(move || crate::hasher::hash_file(&path_owned))
+                    .await
+                {
+                    Ok(Ok(id)) => id,
+                    Ok(Err(e)) => {
+                        tracing::debug!(
+                            path = %row.path,
+                            error = %e,
+                            "background hash failed, skipping"
+                        );
+                        batch_errors += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %row.path,
+                            error = %e,
+                            "background hash task panicked"
+                        );
+                        batch_errors += 1;
+                        continue;
+                    }
+                };
+
+            let new_id_hex = new_object_id.to_string();
+
             // Upgrade in database: insert real object, re-point locations, delete synthetic.
-            match queries::upgrade_deferred_object(&pool, &row.object_id, &new_id_hex, "content")
-                .await
-            {
-                Ok(_) => {
+            match queries::upgrade_deferred_object(&pool, &row.object_id, &new_id_hex).await {
+                Ok(true) => {
                     batch_upgraded += 1;
 
                     // Populate inode cache so next scan gets a cache hit.
                     if let Some(fid) = row.fid {
                         if let Ok(fid_u64) = u64::try_from(fid) {
-                            let mtime = chrono::NaiveDateTime::parse_from_str(
+                            let size = u64::try_from(row.size_bytes).unwrap_or(0);
+                            // M1: Don't silently fall back to mtime=0 — skip cache
+                            // insert if timestamp can't be parsed.
+                            match chrono::NaiveDateTime::parse_from_str(
                                 &row.modified_at,
                                 "%Y-%m-%d %H:%M:%S",
-                            )
-                            .map(|dt| dt.and_utc().timestamp())
-                            .unwrap_or(0);
-                            let size = u64::try_from(row.size_bytes).unwrap_or(0);
-                            let cache_key =
-                                inode::cache_key_v2(&config.volume_id, fid_u64, mtime, size);
-                            if let Err(e) = inode::insert(&cache, &cache_key, &new_id_hex) {
-                                tracing::warn!(error = %e, "inode cache insert failed");
+                            ) {
+                                Ok(dt) => {
+                                    let mtime = dt.and_utc().timestamp();
+                                    let cache_key = inode::cache_key_v2(
+                                        &config.volume_id,
+                                        fid_u64,
+                                        mtime,
+                                        size,
+                                    );
+                                    if let Err(e) = inode::insert(&cache, &cache_key, &new_id_hex) {
+                                        tracing::warn!(error = %e, "inode cache insert failed");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        modified_at = %row.modified_at,
+                                        error = %e,
+                                        "could not parse modified_at — skipping inode cache"
+                                    );
+                                }
                             }
                         }
                     }
+                }
+                Ok(false) => {
+                    // Already upgraded by another worker or old==new collision.
+                    total_skipped += 1;
+                    tracing::debug!(old_id = %row.object_id, "object already upgraded, skipping");
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -190,7 +222,7 @@ pub async fn run_background_hasher(
     BackgroundHashResult {
         upgraded: total_upgraded,
         errors: total_errors,
-        unchanged: total_unchanged,
+        skipped: total_skipped,
     }
 }
 

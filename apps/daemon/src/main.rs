@@ -324,10 +324,14 @@ async fn main() -> Result<()> {
 
     // ── Background hasher: upgrade deferred objects to real BLAKE3 hashes ──
     let bg_cancel = tokio_util::sync::CancellationToken::new();
-    let pending = hyprdrive_core::db::queries::pending_hash_count(&pool)
-        .await
-        .unwrap_or(0);
-    let _bg_hasher_task: Option<tokio::task::JoinHandle<_>> = if pending > 0 {
+    let pending = match hyprdrive_core::db::queries::pending_hash_count(&pool).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "pending_hash_count failed, skipping background hasher");
+            0
+        }
+    };
+    let mut bg_hasher_task: Option<tokio::task::JoinHandle<()>> = if pending > 0 {
         info!(pending, "spawning background hasher");
         #[cfg(target_os = "windows")]
         let volume_id = derive_volume_id(std::path::Path::new(DEFAULT_SCAN_ROOT));
@@ -372,6 +376,18 @@ async fn main() -> Result<()> {
                 match result {
                     Some(volume) => {
                         info!(volume = %volume.display(), "Full rescan requested by watcher");
+
+                        // M4: Cancel background hasher before rescan to avoid
+                        // concurrent writes during bulk_load_begin (synchronous=OFF).
+                        bg_cancel.cancel();
+                        if let Some(t) = bg_hasher_task.take() {
+                            match tokio::time::timeout(std::time::Duration::from_secs(30), t).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => tracing::error!(error = %e, "background hasher panicked"),
+                                Err(_) => tracing::warn!("background hasher did not stop within 30s for rescan"),
+                            }
+                        }
+
                         #[cfg(any(target_os = "windows", target_os = "linux"))]
                         {
                             // Determine scan root for rescan.
@@ -424,6 +440,15 @@ async fn main() -> Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "watcher task panicked"),
             Err(_) => tracing::warn!("watcher task did not stop within 10s"),
+        }
+    }
+
+    // H3: Await background hasher with timeout before closing pool.
+    if let Some(t) = bg_hasher_task.take() {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), t).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "background hasher panicked"),
+            Err(_) => tracing::warn!("background hasher did not stop within 30s"),
         }
     }
 

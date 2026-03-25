@@ -30,16 +30,16 @@ pub fn hash_file(path: &Path) -> PipelineResult<ObjectId> {
 /// Used in deferred-hashing mode: first scan gets synthetic IDs,
 /// background worker upgrades them to real BLAKE3 content hashes later.
 ///
-/// The "deferred:" prefix makes collision with real content hashes cryptographically impossible.
+/// Uses `new_derive_key` with a domain string for cryptographic separation from
+/// real content hashes. Length-prefixed volume_id prevents ambiguity from
+/// variable-length fields.
 pub fn synthetic_file_object_id(volume_id: &str, fid: u64, mtime: i64, size: u64) -> ObjectId {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"deferred:");
-    hasher.update(volume_id.as_bytes());
-    hasher.update(b":");
+    let mut hasher = blake3::Hasher::new_derive_key("hyprdrive deferred v1");
+    let vid = volume_id.as_bytes();
+    hasher.update(&(vid.len() as u64).to_le_bytes());
+    hasher.update(vid);
     hasher.update(&fid.to_le_bytes());
-    hasher.update(b":");
     hasher.update(&mtime.to_le_bytes());
-    hasher.update(b":");
     hasher.update(&size.to_le_bytes());
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -127,9 +127,8 @@ pub fn hash_entries_batch(
     for (i, entry) in entries.iter().enumerate() {
         if entry.is_dir {
             // Directories get a synthetic ObjectId — no file I/O.
-            // Uses raw OS bytes to avoid lossy UTF-8 conversion collisions.
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"dir:");
+            // Uses derive_key for domain separation from content hashes.
+            let mut hasher = blake3::Hasher::new_derive_key("hyprdrive directory v1");
             hasher.update(entry.full_path.as_os_str().as_encoded_bytes());
             let hash = hasher.finalize();
             let object_id = ObjectId::from_bytes(*hash.as_bytes());

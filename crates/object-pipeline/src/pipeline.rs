@@ -187,6 +187,21 @@ impl ObjectPipeline {
             total_errors += hash_result.errors.len();
             total_deferred += hash_result.deferred;
 
+            // M5: Surface hash errors at warn level so they appear in production logs.
+            if !hash_result.errors.is_empty() {
+                let sample: Vec<&str> = hash_result
+                    .errors
+                    .iter()
+                    .take(3)
+                    .map(|(_, msg)| msg.as_str())
+                    .collect();
+                tracing::warn!(
+                    count = hash_result.errors.len(),
+                    sample = ?sample,
+                    "entries failed to hash in batch"
+                );
+            }
+
             // Build ObjectRows and LocationRows from hash results.
             let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
             let mut object_rows: Vec<ObjectRow> = Vec::with_capacity(hash_result.results.len());
@@ -211,9 +226,9 @@ impl ObjectPipeline {
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     hash_state: if hr.synthetic && !entry.is_dir {
-                        "deferred".to_string()
+                        hyprdrive_core::db::types::hash_state::DEFERRED.to_string()
                     } else {
-                        "content".to_string()
+                        hyprdrive_core::db::types::hash_state::CONTENT.to_string()
                     },
                 });
 
