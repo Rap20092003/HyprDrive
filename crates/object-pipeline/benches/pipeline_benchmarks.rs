@@ -70,7 +70,7 @@ fn bench_batch_cache_miss(c: &mut Criterion) {
             // Unique cache file per iteration = guaranteed all misses.
             let n = counter.fetch_add(1, Ordering::Relaxed);
             let cache = Database::create(cache_dir.path().join(format!("bench_{n}.redb"))).unwrap();
-            hasher::hash_entries_batch(&entries, &cache, "vol_bench");
+            hasher::hash_entries_batch(&entries, &cache, "vol_bench", false);
         })
     });
 }
@@ -92,11 +92,11 @@ fn bench_batch_cache_hit(c: &mut Criterion) {
     }
 
     // Warm the cache.
-    hasher::hash_entries_batch(&entries, &cache, "vol_bench");
+    hasher::hash_entries_batch(&entries, &cache, "vol_bench", false);
 
     c.bench_function("hash_batch_100_cache_hit", |b| {
         b.iter(|| {
-            hasher::hash_entries_batch(&entries, &cache, "vol_bench");
+            hasher::hash_entries_batch(&entries, &cache, "vol_bench", false);
         })
     });
 }
