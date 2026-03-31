@@ -1,6 +1,6 @@
 # HyprDrive — Virtual Distributed File System
 
-## Architecture & Implementation Specification v4.0
+## Architecture & Implementation Specification v4.1
 
 > **The personal data OS.** Cross-platform, P2P-first, content-addressed,
 > cryptographically sovereign, with WizTree-speed disk intelligence.
@@ -307,55 +307,82 @@ HyprDrive's daemon is called `hyprdrive-daemon`. It is **the** system.
 ```
 hyprdrive-daemon (THE system)
 │
-├── Database        — SQLite database with all file metadata
-├── Indexer         — Scans your drives for files
-├── File Watcher    — Detects changes in real-time (USN listener)
-├── Dedup Engine    — Finds duplicate files (content + fuzzy + perceptual)
-├── Hasher          — Computes content hashes (BLAKE3)
-├── Crypto Engine   — Encrypts/decrypts data (ChaCha20)
-├── P2P Node        — Connects to other devices (Iroh + QUIC)
-├── Transfer Engine — Sends/receives files (Blip)
-├── Sync Engine     — Keeps devices in agreement (CRDTs)
-├── Extension Host  — Runs WASM plugins (wasmtime)
-├── Media Worker    — Generates thumbnails, extracts metadata
-├── Search Index    — Full-text + semantic search (Tantivy)
-├── Task Queue      — Manages background jobs
-├── Event Bus       — Notifies all components of changes
+├── Database           — SQLite database with all file metadata
+├── Inode Cache        — redb key-value store (cache hits skip hashing)
+├── Indexer            — Scans your drives for files (MFT, io_uring)
+├── Object Pipeline  ★ — Batch hashing + DB upsert (deferred or real)
+├── Background Hasher★ — Upgrades deferred → real BLAKE3 hashes
+├── File Watcher     ★ — Real-time USN/inotify with event coalescing
+├── Change Processor ★ — Dispatches watcher events (create/delete/move)
+├── Dedup Engine       — Finds duplicate files (content + fuzzy + perceptual)
+├── Crypto Engine      — Encrypts/decrypts data (ChaCha20)
+├── P2P Node           — Connects to other devices (Iroh + QUIC)
+├── Transfer Engine    — Sends/receives files (Blip)
+├── Sync Engine        — Keeps devices in agreement (CRDTs)
+├── Extension Host     — Runs WASM plugins (wasmtime)
+├── Media Worker       — Generates thumbnails, extracts metadata
+├── Search Index       — Full-text + semantic search (Tantivy)
+├── Task Queue         — Manages background jobs
+├── Event Bus          — Notifies all components of changes
 │
-├── WebSocket :7420 — Real-time connection for apps
-├── HTTP API :7421  — REST endpoints for external tools
-└── Metrics :7422   — Prometheus monitoring
+├── WebSocket :7420    — Real-time connection for apps
+├── HTTP API :7421     — REST endpoints for external tools
+└── Metrics :7422      — Prometheus monitoring
+
+★ = Implemented and tested (see Sections 8–12 for details)
 ```
 
 ### Daemon Lifecycle
 
 ```
-STARTUP:
+STARTUP (actual implementation):
   1. Read config file (or create defaults)
-  2. Open SQLite database (create if first run)
-  3. Start Iroh P2P node (begin discovering other devices)
-  4. Start file watchers on all indexed locations
-  5. Start WebSocket server on :7420
-  6. Start HTTP server on :7421
-  7. Start metrics server on :7422
-  8. Load WASM extensions
-  9. Signal "ready" to any waiting clients
+  2. Open SQLite database (run 13 migrations if needed)
+  3. Open redb inode cache (create if first run)
+  4. Full scan with DEFERRED hashing (bulk_load mode for 10-20× speed):
+     a. Enable bulk_load_begin (drop FTS triggers, synchronous=OFF)
+     b. Scan filesystem via platform indexer (MFT / io_uring / getattrlistbulk)
+     c. Process entries through ObjectPipeline (defer_content_hashing=true)
+     d. Disable bulk_load_finish (recreate triggers, synchronous=NORMAL)
+     e. Populate directory size aggregations
+  5. Start background hasher (if pending deferred objects exist):
+     → Spawns tokio task to upgrade synthetic → real BLAKE3 hashes
+     → Processes in batches of 500, 100ms between batches
+     → Populates inode cache for future cache hits
+  6. Start USN listener / Linux listener (real-time filesystem watcher):
+     → Pre-seed cursor store from scan cursor
+     → Seed ChangeProcessor with fid→path map from scan entries
+     → Spawn WatcherLoop (debounce 300ms, max 5000 events/batch)
+  7. Start Iroh P2P node (begin discovering other devices)
+  8. Start WebSocket server on :7420
+  9. Start HTTP server on :7421
+  10. Start metrics server on :7422
+  11. Load WASM extensions
+  12. Signal "ready" to any waiting clients
 
 RUNNING:
   - Accept client connections (Tauri, CLI, web, mobile)
-  - Process file system events (new/changed/deleted files)
+  - Process file system events via WatcherLoop → ChangeProcessor pipeline
+  - Background hasher upgrades deferred objects (runs until queue empty)
   - Handle sync messages from peer devices
   - Execute extension logic
   - Respond to search queries
   - Manage file transfers
 
+RESCAN (when USN journal wraps or FullRescanNeeded):
+  1. Cancel background hasher (avoid concurrent writes during bulk mode)
+  2. Wait up to 30s for hasher to finish current batch
+  3. Run full scan again (same as STARTUP step 4)
+  4. Restart background hasher if new deferred objects exist
+
 SHUTDOWN:
-  1. Flush all pending database writes
-  2. Save sync checkpoints
-  3. Close P2P connections gracefully
-  4. Stop file watchers
-  5. Close WebSocket/HTTP servers
-  6. Exit
+  1. Cancel background hasher (CancellationToken)
+  2. Stop USN listener / Linux listener (CancellationToken)
+  3. Flush all pending database writes
+  4. Save sync checkpoints + watcher cursors
+  5. Close P2P connections gracefully
+  6. Close WebSocket/HTTP servers
+  7. Exit
 ```
 
 ### How Clients Talk to the Daemon
@@ -424,6 +451,7 @@ HyprDrive/
 │
 ├── crates/                        ← Specialized libraries
 │   ├── fs-indexer/                ← File scanning (MFT, getattrlistbulk, io_uring)
+│   ├── object-pipeline/           ← Content hashing, DB upsert, background hasher ★
 │   ├── disk-intelligence/         ← WizTree engine (treemap, usage analysis)
 │   ├── file-transfer/             ← Blip transfer (QUIC, resume, routing)
 │   ├── crypto/                    ← Cryptographic primitives
@@ -437,6 +465,8 @@ HyprDrive/
 │   ├── task-system/               ← Background job execution
 │   ├── actors/                    ← Actor concurrency framework
 │   └── utils/                     ← Shared utilities
+│
+│   ★ = Actively developed with tests. Many other crates are scaffold-only.
 │
 ├── helpers/                       ← Privileged helper processes
 │   ├── hyprdrive-helper-windows/       ← Windows: MFT access (needs admin)
@@ -678,40 +708,220 @@ BLAKE3 is fast because:
 
 ### How Hashing Works in HyprDrive
 
+HyprDrive supports TWO hashing modes, selected by the `defer_content_hashing` flag
+in `PipelineConfig`:
+
 ```
-WHEN a new file is discovered during indexing:
+MODE 1: DEFERRED HASHING (default for first scan — 10× faster)
+
+  When defer_content_hashing = true:
 
   1. Check the INODE CACHE:
-     Key = (volume_id, inode_number, last_modified_time)
+     Key = (volume_id, fid, mtime, size)  ← cache_key_v2
 
-     IF cache HIT (file hasn't changed since last hash):
-       → Return cached ObjectId (skip hashing entirely)
-       → This saves MASSIVE time on re-scans (95%+ cache hit rate)
+     IF cache HIT: → Return cached ObjectId (no I/O)
+     IF cache MISS: → Continue to step 2
 
-     IF cache MISS (new file or file was modified):
-       → Continue to step 2
+  2. Generate SYNTHETIC ObjectId (NO disk I/O):
+     ObjectId = BLAKE3_derive_key("hyprdrive deferred v1",
+                  volume_id || fid || mtime || size)
 
-  2. Hash the file:
+     This is deterministic — same file metadata always produces the
+     same synthetic ID. But it's NOT based on file content yet.
+
+  3. Store with hash_state = 'deferred':
+     → Object row: id=synthetic, hash_state='deferred'
+     → Location row: path, size, timestamps, fid
+     → Synthetic IDs are NEVER written to inode cache
+
+  4. Background hasher upgrades later (see below)
+
+  WHY defer? Reading content from disk is the #1 bottleneck on first scan.
+  A 1M-file drive takes ~90 seconds to hash but < 3 seconds to index
+  metadata. Deferred mode shows results INSTANTLY, then hashes in background.
+
+
+MODE 2: REAL HASHING (used for re-scans, change events, explicit requests)
+
+  When defer_content_hashing = false:
+
+  1. Check the INODE CACHE:
+     Key = (volume_id, fid, mtime, size)
+
+     IF cache HIT: → Return cached ObjectId (95%+ hit rate on re-scans)
+     IF cache MISS: → Continue to step 2
+
+  2. Hash the file content (BLAKE3):
+     IF file size = 0:
+       → Deterministic empty-file hash (no I/O needed)
      IF file < 512 MB:
-       → Read file in streaming chunks, feed to BLAKE3
+       → Read file in streaming 64 KB chunks, feed to BLAKE3
      IF file ≥ 512 MB:
        → Memory-map the file (let the OS handle I/O efficiently)
        → Feed mapped memory to BLAKE3
 
   3. Generate ObjectId:
-     ObjectId = first 32 bytes of BLAKE3 hash
+     ObjectId = BLAKE3 hash (32 bytes, hex-encoded for DB storage)
 
-  4. Upsert to database:
-     → Store Object (content identity) in "objects" table
-     → Store Location (where the file lives) in "locations" table
-     → Same ObjectId + different Locations = duplicate detection!
+  4. Store with hash_state = 'content':
+     → Object row: id=real_hash, hash_state='content'
+     → Location row: path, size, timestamps, fid
 
   5. Update inode cache:
-     → Save (volume_id, inode, mtime) → ObjectId for next time
+     → Save (volume_id, fid, mtime, size) → ObjectId
+     → Next scan of this file will be a cache HIT (no I/O)
 
   6. Emit event:
-     → EventBus.emit("ObjectIndexed", { object_id, location_id })
+     → PipelineBatchComplete { hashed, cached, deferred, skipped }
      → All listeners (UI, sync, search) get notified
+
+
+BATCH PROCESSING (how entries flow through the pipeline):
+
+  Entries arrive in batches (default 20,000):
+
+  ┌──────────────┐     ┌──────────────────┐     ┌──────────────┐
+  │ Batch cache   │ →   │ Classify entries  │ →   │ Parallel     │
+  │ lookup (redb) │     │ (dir/hit/miss)    │     │ hash (rayon) │
+  └──────────────┘     └──────────────────┘     └──────────────┘
+        │                      │                        │
+   Single read tx        Directories get           If defer=true:
+   for all entries       synthetic IDs             → synthetic IDs
+                         (no I/O ever)             If defer=false:
+                                                   → real BLAKE3
+                                                        │
+                                                        ▼
+                                               ┌──────────────┐
+                                               │ Batch cache   │
+                                               │ insert (redb) │
+                                               └──────────────┘
+                                               Only real hashes
+                                               written to cache
+```
+
+### The Background Hasher
+
+```
+After the first scan completes with deferred hashing, the daemon spawns
+a background worker to upgrade synthetic ObjectIds → real BLAKE3 hashes.
+
+How it works:
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  Background Hasher (tokio::spawn)                        │
+  │                                                         │
+  │  loop {                                                 │
+  │    batch = fetch_deferred_batch(limit=500)              │
+  │    if batch.is_empty() { break }                        │
+  │                                                         │
+  │    for each object in batch:                            │
+  │      real_hash = BLAKE3(read_file(path))                │
+  │      upgrade_deferred_object(old=synthetic, new=real)   │
+  │      populate_inode_cache(fid, mtime, size → real_hash) │
+  │                                                         │
+  │    if zero_progress { break }  // avoid infinite loops  │
+  │    sleep(100ms)                // don't monopolize I/O  │
+  │    check cancellation_token    // rescan may cancel us  │
+  │  }                                                      │
+  └─────────────────────────────────────────────────────────┘
+
+  The upgrade_deferred_object() function is an ATOMIC transaction:
+    1. INSERT new object with hash_state='content' + real BLAKE3 hash
+    2. UPDATE all locations pointing to old synthetic ID → new real ID
+    3. DELETE old synthetic object (now orphaned)
+
+  Guard: if synthetic_id == real_hash (rare collision), skip the
+  transaction to avoid a cascade delete destroying the object.
+
+  The CASE-based upsert rule:
+    ON CONFLICT(id) DO UPDATE SET
+      hash_state = CASE
+        WHEN excluded.hash_state = 'content' THEN 'content'
+        ELSE objects.hash_state
+      END
+
+    This ensures hash_state can only be UPGRADED (deferred → content),
+    never DOWNGRADED (content → deferred). A re-scan with deferred mode
+    won't overwrite a previously completed real hash.
+```
+
+### The Object Pipeline (crates/object-pipeline/)
+
+```
+The ObjectPipeline is the central orchestrator for turning raw filesystem
+entries into database rows. It sits between the indexer (which discovers
+files) and the database (which stores them).
+
+Crate structure:
+  object-pipeline/src/
+  ├── pipeline.rs          — ObjectPipeline orchestrator + PipelineConfig
+  ├── hasher.rs            — hash_entries_batch() + synthetic_file_object_id()
+  ├── background_hasher.rs — run_background_hasher() (deferred → content)
+  ├── change_processor.rs  — ChangeProcessor (real-time delta handling)
+  ├── error.rs             — PipelineError enum
+  └── lib.rs               — Public API re-exports
+
+PipelineConfig:
+  volume_id:               String   — Which volume we're indexing
+  batch_size:              usize    — Entries per DB batch (default: 20,000)
+  skip_directories:        bool     — Skip dir entries (for delta processing)
+  mime_detection:          bool     — Detect MIME from extension (50+ types)
+  defer_content_hashing:   bool     — Use synthetic IDs (true for first scan)
+
+ObjectPipeline::process_entries(entries) flow:
+
+  1. FILTER + SORT
+     → Remove directories if skip_directories=true
+     → Sort by path depth (parents before children)
+     → Prevents FK violations when entries span batches
+
+  2. PRE-COMPUTE LOCATION IDs
+     → location_id = BLAKE3(volume_id + ":" + path)
+     → Deterministic — same file at same path always gets same ID
+     → Pre-computed once, reused in batch loop (avoids 847K redundant hashes)
+
+  3. BATCH PROCESS (in chunks of batch_size)
+     → Call hash_entries_batch() with defer flag
+     → Build ObjectRow + LocationRow structs
+     → Set hash_state = 'deferred' if synthetic, 'content' if real
+     → Batch upsert via upsert_objects_batch() + upsert_locations_batch()
+
+  4. EMIT STATS
+     → Return PipelineBatchComplete event
+     → { hashed, cached, deferred, skipped, errors }
+
+
+ChangeProcessor (real-time delta handling):
+
+  Receives batched FsChange events from the WatcherLoop and dispatches:
+
+  ┌──────────────────────────────────────────────────────┐
+  │ FsChange::Created                                     │
+  │   1. Resolve path (from fid_map or FsChange.full_path)│
+  │   2. Stat file for size/timestamps                    │
+  │   3. Feed to ObjectPipeline::process_entries()        │
+  │   4. Update fid_map                                   │
+  ├──────────────────────────────────────────────────────┤
+  │ FsChange::Deleted                                     │
+  │   1. Try fid-based deletion (O(1) on Windows)        │
+  │   2. Fallback to path-based deletion                  │
+  │   3. Clean orphaned objects (zero remaining locations)│
+  │   4. Remove from fid_map                              │
+  ├──────────────────────────────────────────────────────┤
+  │ FsChange::Moved                                       │
+  │   1. Resolve new path from parent_fid + new_name     │
+  │   2. Atomic relocate_location (DELETE + INSERT)      │
+  │   3. Update fid_map                                   │
+  ├──────────────────────────────────────────────────────┤
+  │ FsChange::Modified                                    │
+  │   1. Look up path via fid_map                        │
+  │   2. Build synthetic IndexEntry with new size         │
+  │   3. Re-process via pipeline (re-hash)               │
+  └──────────────────────────────────────────────────────┘
+
+  The ChangeProcessor maintains an in-memory fid→path HashMap
+  (seeded from scan entries at startup) for O(1) path resolution
+  from USN events that only carry a file reference number.
 ```
 
 ---
@@ -735,21 +945,38 @@ HyprDrive stores all file metadata in SQLite because:
 
 ```
 OBJECTS table — one row per unique piece of content
-  ┌────────────┬──────────┬──────────┬────────────┐
-  │ id (hash)  │ size     │ kind     │ created_at │
-  ├────────────┼──────────┼──────────┼────────────┤
-  │ a7f3b2c9.. │ 4200000  │ File     │ 2024-01-15 │
-  │ 5e2d1f8a.. │ 0        │ Dir      │ 2024-01-15 │
-  └────────────┴──────────┴──────────┴────────────┘
+  ┌────────────┬──────────┬──────────┬────────────┬────────────┐
+  │ id (hash)  │ size     │ kind     │ hash_state │ created_at │
+  ├────────────┼──────────┼──────────┼────────────┼────────────┤
+  │ a7f3b2c9.. │ 4200000  │ File     │ content    │ 2024-01-15 │
+  │ d3f1a8b2.. │ 8100000  │ File     │ deferred   │ 2024-01-15 │
+  │ 5e2d1f8a.. │ 0        │ Dir      │ content    │ 2024-01-15 │
+  └────────────┴──────────┴──────────┴────────────┴────────────┘
+
+  hash_state column (migration 012):
+    'content'  — id is a real BLAKE3 hash of file bytes
+    'deferred' — id is a synthetic placeholder (background hasher will upgrade)
+
+  Enforced by trigger constraints (migration 013):
+    INSERT/UPDATE must have hash_state IN ('content', 'deferred')
+
+  Partial index: idx_objects_deferred WHERE hash_state = 'deferred'
+    → Only indexes the small fraction of deferred rows
+    → Background hasher queries are fast even with millions of objects
 
 LOCATIONS table — one row per place a file exists
-  ┌────────────┬────────────┬──────────────────────────┬──────────┐
-  │ id         │ object_id  │ path                     │ volume   │
-  ├────────────┼────────────┼──────────────────────────┼──────────┤
-  │ loc_001    │ a7f3b2c9.. │ /Users/alice/photo.jpg   │ vol_mac  │
-  │ loc_002    │ a7f3b2c9.. │ /Users/alice/backup.jpg  │ vol_mac  │
-  └────────────┴────────────┴──────────────────────────┴──────────┘
+  ┌────────────┬────────────┬──────────────────────────┬──────────┬─────────┐
+  │ id         │ object_id  │ path                     │ volume   │ fid     │
+  ├────────────┼────────────┼──────────────────────────┼──────────┼─────────┤
+  │ loc_001    │ a7f3b2c9.. │ /Users/alice/photo.jpg   │ vol_mac  │ 1048576 │
+  │ loc_002    │ a7f3b2c9.. │ /Users/alice/backup.jpg  │ vol_mac  │ 1048921 │
+  └────────────┴────────────┴──────────────────────────┴──────────┴─────────┘
   ↑ Same object_id = same content = DUPLICATE DETECTED!
+
+  fid column (migration 010):
+    File Reference Number (NTFS) or synthetic inode (Linux).
+    Enables O(1) lookup when USN journal events only carry fid, not path.
+    Index: idx_loc_fid ON locations(volume_id, fid)
 
 Other important tables:
   - tags, tag_relations      → user-defined tags + hierarchy
@@ -761,6 +988,19 @@ Other important tables:
   - files_fts                → Full-Text Search index (FTS5)
   - temporal_index           → dates from EXIF for timeline view
   - backlinks                → wiki-style [[links]] between files
+  - cursor_store             → watcher position persistence (USN/inotify)
+  - _applied_migrations      → tracks which of 13 migrations have run
+
+  cursor_store (migration 011):
+    ┌──────────────┬──────────────┬─────────────┐
+    │ volume_key   │ cursor_json  │ updated_at  │
+    ├──────────────┼──────────────┼─────────────┤
+    │ "C:\\"       │ {"journal_id"│ 2024-01-15  │
+    │              │  :1234,...}  │             │
+    └──────────────┴──────────────┴─────────────┘
+    Stores USN journal cursor (Windows) or inotify state (Linux).
+    On daemon restart, cursor is loaded → resume from last position.
+    No full rescan needed unless journal wraps.
 ```
 
 ### Performance Tuning
@@ -768,10 +1008,37 @@ Other important tables:
 ```
 SQLite is configured for maximum speed:
 
-  WAL mode          → readers don't block writers (concurrent access)
-  synchronous=NORMAL → fast writes (slight risk in power loss, acceptable)
+  WAL mode           → readers don't block writers (concurrent access)
+  synchronous=NORMAL → fast writes (safe with WAL, 10× faster than FULL)
+  foreign_keys=ON    → enforce referential integrity
+  busy_timeout=5000  → wait 5s before SQLITE_BUSY error
   journal_size=64MB  → limits disk usage for the write-ahead log
   mmap_size=256MB    → memory-map the database for faster reads
+  max_connections=5  → connection pool limit
+
+Migrations (13 total, manually registered in core/src/db/pool.rs):
+  001_objects          — Content identity table
+  002_locations        — File path/volume mapping
+  003_dir_sizes        — Pre-computed directory sizes
+  004_metadata         — EXIF, audio tags, PDF info
+  005_tags             — User-defined tags + hierarchy
+  006_virtual_folders  — Saved searches / smart folders
+  007_sync_operations  — Change log for sync
+  008_file_types       — 200+ extensions with categories
+  009_fts              — Full-Text Search (FTS5)
+  010_fid_column       — File reference number for O(1) event lookups
+  011_cursor_store     — Watcher position persistence
+  012_hash_state       — Deferred hashing support + partial index
+  013_hash_state_check — Trigger-based enum constraint
+
+  Migrations are idempotent (tracked in _applied_migrations table).
+  New migrations MUST be added to the include_str! array in pool.rs.
+
+Bulk load mode (for initial scans):
+  bulk_load_begin()   → DROP FTS triggers, synchronous=OFF
+  bulk_load_finish()  → RECREATE triggers, synchronous=NORMAL
+  This provides 10-20× speedup for large imports by deferring
+  FTS index updates and removing fsync overhead.
 
 The critical query — list_files_fast():
 
@@ -1063,20 +1330,36 @@ Pressing Cmd+Z (Mac) or Ctrl+Z (Windows) replays the inverse:
 ```
 HyprDrive needs to know INSTANTLY when a file changes on disk.
 
-How it works:
+How it works (implemented):
 
   1. Platform watcher detects a change:
-     - Windows: USN journal polling (UsnListener — continuous background monitor)
-     - macOS: FSEvents notification
-     - Linux: fanotify event
+     - Windows: USN journal polling (UsnListener — 100ms poll interval)
+     - Linux: inotify event stream (LinuxListener)
+     - macOS: FSEvents notification (planned)
 
-  2. Debounce:
-     If 1,000 files change in 100ms (e.g., npm install),
-     combine them into ONE batch event instead of 1,000 individual events.
+  2. WatcherLoop debounce + coalescing:
+     The WatcherLoop (apps/daemon/src/watcher.rs) receives raw FsChange
+     events and applies two optimizations:
 
-  3. Event pipeline:
-     Change detected → Debounce (100ms window) → Hash new content
-     → Update database → Emit "ObjectIndexed" event → UI re-renders
+     DEBOUNCE (300ms window, max 5,000 events per batch):
+       → Wait 300ms after first event, drain all queued events
+       → Prevents processing 1,000 individual events from "npm install"
+
+     COALESCING (state machine per fid):
+       → Created then Deleted = Cancelled (skip entirely)
+       → Deleted then Created = Modified (treat as edit)
+       → Created then Modified = Created (keep creation, discard redundant modify)
+       → Moved then Modified = MovedThenModified (preserve both operations)
+       → Moved then Deleted = Cancelled (file gone)
+
+     This reduces 10,000 raw USN events into ~200 meaningful changes.
+
+  3. ChangeProcessor dispatches each coalesced event:
+     FsChange::Created  → stat file, feed to ObjectPipeline
+     FsChange::Deleted  → delete location (fid or path), clean orphan objects
+     FsChange::Moved    → atomic relocate_location (DELETE + INSERT)
+     FsChange::Modified → re-hash via pipeline
+     FsChange::FullRescanNeeded → signal daemon for full rescan
 
   4. UI invalidation:
      The daemon sends WebSocket messages to all connected clients.
@@ -1130,6 +1413,33 @@ Key design:
   Multi-volume         — Each drive (C:\, D:\, etc.) monitored independently
 
 Event latency target: < 200ms from file change to FsChange event
+```
+
+### Linux Listener (inotify-based)
+
+```
+On Linux, HyprDrive uses inotify for filesystem change detection.
+(fanotify planned for future — requires more privileges.)
+
+Architecture:
+
+  ┌───────────────────────────────────────┐
+  │         LinuxListener                  │
+  │  ┌─────────────────────────────────┐  │
+  │  │  Inotify watcher thread         │  │
+  │  │  watches: IN_CREATE, IN_DELETE, │  │
+  │  │    IN_MOVED_FROM, IN_MOVED_TO,  │──┼──→ mpsc::Sender<FsChange>
+  │  │    IN_MODIFY, IN_CLOSE_WRITE    │  │         │
+  │  └─────────────────────────────────┘  │         ▼
+  │  CancellationToken → graceful stop    │   WatcherLoop consumer
+  └───────────────────────────────────────┘
+
+Key differences from Windows:
+  - Uses inotify (not fanotify) — no special privileges needed
+  - Path-based events (not fid-based) — ChangeProcessor uses
+    path-based deletion as primary, fid-based as fallback
+  - Recursive watching via explicit directory registration
+  - LinuxCursor tracks last_scan_epoch_ms for delta scanning
 ```
 
 ---
@@ -1945,28 +2255,37 @@ OPERATING SYSTEMS:
 For anyone new to these concepts:
 
 ```
+BackgroundHasher  Worker that upgrades deferred (synthetic) ObjectIds to real BLAKE3 hashes
 BLAKE3          Fast cryptographic hash function (like SHA-256 but 10× faster)
 BIP39           Standard for turning encryption keys into 24-word phrases
 Blurhash        Tiny (~30 byte) color placeholder shown before thumbnails load
 Capability Token  Signed permission slip authorizing a specific action
+ChangeProcessor   Dispatches real-time filesystem events to the object pipeline
 ChaCha20-Poly1305  Encryption algorithm (encrypts + verifies integrity)
 CLI             Command Line Interface (text-based app in terminal)
 CLIP            AI model that understands both images and text
 CRDT            Data structure that syncs without conflicts
 Daemon          Background process with no visible window
 Dedup Engine    Multi-strategy duplicate detection (content hash, fuzzy, perceptual)
+Deferred hashing  First-scan optimization: generate synthetic IDs from metadata, hash later
+DeferredObjectRow Database row type for objects awaiting background hashing
 Ed25519         Digital signature algorithm (proves identity)
 EventBus        Internal message system — components notify each other
+fid               File reference number (NTFS File ID or synthetic inode on Linux)
 FTS5            SQLite's Full-Text Search engine
 getattrlistbulk macOS syscall that reads 1024 file attributes at once
+hash_state        Column on objects table: 'content' (real hash) or 'deferred' (synthetic)
 HKDF            Key derivation function (creates sub-keys from master key)
 HNSW            Hierarchical graph index for finding similar vectors fast
 image_hasher    Perceptual hashing library for detecting visually similar images
+inode cache       redb KV store mapping (volume, fid, mtime, size) → ObjectId for cache hits
+inotify           Linux kernel API for filesystem change notifications
 io_uring        Linux async I/O interface for high-throughput disk reads
 Iroh            P2P networking library by n0.computer
 Jaro-Winkler    String similarity metric (0.0–1.0) for fuzzy filename matching
 MFT             Master File Table — NTFS's index of all files on a drive
 mDNS            Protocol for discovering devices on a local network
+ObjectPipeline    Orchestrates batch entry processing: hashing, DB upsert, event emission
 OpenDAL         Rust library for unified cloud storage access
 P2P             Peer-to-peer — devices connect directly, no server
 QUIC            Modern transport protocol (like TCP, but faster + encrypted)
@@ -1974,7 +2293,9 @@ RRF             Reciprocal Rank Fusion — merges search results from multiple e
 rspc            Type-safe RPC library for Rust ↔ TypeScript communication
 redb            Embedded key-value store (like a fast Dictionary/HashMap on disk)
 Specta           Auto-generates TypeScript/Swift types from Rust structs
+sqlx              Rust async database driver with compile-time query checking
 Squarified Treemap  Layout algorithm for disk usage visualization
+Synthetic ObjectId  Deterministic placeholder from metadata (volume+fid+mtime+size)
 SQLite          Embedded database engine (runs inside your app, no server)
 TanStack        React libraries for tables, virtual scrolling, and data fetching
 Tantivy         Rust full-text search engine (like Elasticsearch, but embedded)
@@ -1984,6 +2305,7 @@ ULID            Unique Lexicographic ID — like UUID but sortable by time
 Union-Find      Data structure for grouping transitive matches (if A=B, B=C → {A,B,C})
 USN             Update Sequence Number — Windows change journal entry
 UsnListener     Background monitor that polls USN journal for real-time file changes
+WatcherLoop       Daemon component that debounces and coalesces filesystem change events
 Vector Clock    Data structure tracking "who has seen what" across devices
 WAL             Write-Ahead Logging — SQLite mode for concurrent access
 WASM            WebAssembly — portable bytecode format for sandboxed execution
@@ -1998,7 +2320,7 @@ X25519          Key exchange algorithm (two devices agree on a shared secret)
 ```
 CORE (Rust):
   Runtime:     Tokio (async)
-  Database:    SQLite + SeaORM
+  Database:    SQLite + sqlx (compile-time query checking)
   Caching:     redb
   Hashing:     BLAKE3
   Dedup:       BLAKE3 progressive + Jaro-Winkler + blockhash (image_hasher)
