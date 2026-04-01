@@ -235,8 +235,7 @@ pub mod framing {
         }
         let mut payload = vec![0u8; len as usize];
         reader.read_exact(&mut payload)?;
-        rmp_serde::from_slice(&payload)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        rmp_serde::from_slice(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 }
 

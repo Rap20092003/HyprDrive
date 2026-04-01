@@ -70,7 +70,11 @@ impl HdPath {
     }
 
     /// Create a cloud path.
-    pub fn cloud(provider: impl Into<String>, bucket: impl Into<String>, key: impl Into<String>) -> Self {
+    pub fn cloud(
+        provider: impl Into<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Self {
         Self::Cloud {
             provider: provider.into(),
             bucket: bucket.into(),
@@ -126,7 +130,11 @@ impl fmt::Display for HdPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Physical(p) => write!(f, "file://{}", p.display()),
-            Self::Cloud { provider, bucket, key } => {
+            Self::Cloud {
+                provider,
+                bucket,
+                key,
+            } => {
                 write!(f, "{}://{}/{}", provider, bucket, key)
             }
             Self::Content { blake3_hex } => write!(f, "blake3://{}", blake3_hex),

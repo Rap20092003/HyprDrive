@@ -11,8 +11,8 @@
 
 use anyhow::Result;
 use hyprdrive_ipc_protocol::{
-    framing, ErrorCode, HelperRequest, HelperResponse, WireCursor, WireIndexEntry,
-    PIPE_NAME, PROTOCOL_VERSION,
+    framing, ErrorCode, HelperRequest, HelperResponse, WireCursor, WireIndexEntry, PIPE_NAME,
+    PROTOCOL_VERSION,
 };
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
@@ -22,12 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::Storage::FileSystem::{
-    FlushFileBuffers, PIPE_ACCESS_DUPLEX,
-};
+use windows::Win32::Storage::FileSystem::{FlushFileBuffers, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-    PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+    PIPE_WAIT,
 };
 
 /// Pipe I/O buffer size (64 KiB).

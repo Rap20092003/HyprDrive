@@ -58,7 +58,10 @@ pub fn pipe_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
         }),
         other => Err(FsIndexerError::HelperError {
             code: "UnexpectedResponse".to_string(),
-            message: format!("expected ScanResult, got {:?}", std::mem::discriminant(&other)),
+            message: format!(
+                "expected ScanResult, got {:?}",
+                std::mem::discriminant(&other)
+            ),
         }),
     }
 }
@@ -150,8 +153,8 @@ fn send_request(request: &HelperRequest) -> FsIndexerResult<HelperResponse> {
 
 /// Convert a wire index entry to a domain IndexEntry.
 fn wire_to_entry(w: WireIndexEntry) -> IndexEntry {
-    let modified_at: DateTime<Utc> = DateTime::from_timestamp(w.modified_at_epoch, 0)
-        .unwrap_or_else(Utc::now);
+    let modified_at: DateTime<Utc> =
+        DateTime::from_timestamp(w.modified_at_epoch, 0).unwrap_or_else(Utc::now);
     IndexEntry {
         fid: w.fid,
         parent_fid: w.parent_fid,

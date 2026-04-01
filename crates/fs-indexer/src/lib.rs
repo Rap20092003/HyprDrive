@@ -29,11 +29,11 @@ pub mod types;
 
 // Re-export key types at crate root
 pub use error::{FsIndexerError, FsIndexerResult};
+pub use priority::{classify_priority, sort_by_priority, ScanPriority};
 pub use types::{
     CursorStore, FilesystemKind, FsChange, IndexCursor, IndexEntry, LinuxCursor, NoCursorStore,
     ScanResult, TopoEntry, UsnCursor,
 };
-pub use priority::{classify_priority, sort_by_priority, ScanPriority};
 
 // Re-export platform-specific scanner functions
 #[cfg(target_os = "windows")]

@@ -61,24 +61,31 @@ pub fn classify_priority(path: &Path) -> ScanPriority {
     let path_lower = path_str.to_ascii_lowercase();
 
     // Tier 0: User-facing
-    if matches_any_component(&path_lower, &[
-        "desktop", "documents", "downloads", "pictures", "photos",
-    ]) {
+    if matches_any_component(
+        &path_lower,
+        &["desktop", "documents", "downloads", "pictures", "photos"],
+    ) {
         return ScanPriority::USER_FACING;
     }
 
     // Tier 1: Common media/home
-    if matches_any_component(&path_lower, &[
-        "music", "videos", "movies", "home",
-    ]) {
+    if matches_any_component(&path_lower, &["music", "videos", "movies", "home"]) {
         return ScanPriority::COMMON;
     }
 
     // Tier 2: System directories
-    if matches_any_component(&path_lower, &[
-        "program files", "program files (x86)", "programdata",
-        "usr", "opt", "etc", "var",
-    ]) {
+    if matches_any_component(
+        &path_lower,
+        &[
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "usr",
+            "opt",
+            "etc",
+            "var",
+        ],
+    ) {
         return ScanPriority::SYSTEM;
     }
 
@@ -106,18 +113,18 @@ fn is_bulk_noise(path: &Path) -> bool {
     static NOISE_NAMES: &[&str] = &[
         "node_modules",
         ".git",
-        "target",        // Rust build output
+        "target", // Rust build output
         "__pycache__",
         ".tox",
         ".mypy_cache",
         "dist",
         "build",
-        ".next",         // Next.js
-        ".nuxt",         // Nuxt.js
+        ".next", // Next.js
+        ".nuxt", // Nuxt.js
         ".cache",
-        "vendor",        // Go/PHP
+        "vendor", // Go/PHP
         ".gradle",
-        ".m2",           // Maven
+        ".m2", // Maven
     ];
 
     for component in path.components() {
@@ -136,7 +143,7 @@ fn is_hidden_cache(path: &Path) -> bool {
         "appdata",
         ".local",
         ".config",
-        "library",       // macOS ~/Library
+        "library", // macOS ~/Library
         ".cache",
         ".thumbnails",
         "temp",
@@ -263,7 +270,10 @@ mod tests {
         assert_eq!(paths[2], PathBuf::from("/home/alice/Music"));
         assert_eq!(paths[3], PathBuf::from("/usr/local/bin"));
         assert_eq!(paths[4], PathBuf::from("/home/alice/.config/nvim"));
-        assert_eq!(paths[5], PathBuf::from("/home/alice/projects/app/node_modules"));
+        assert_eq!(
+            paths[5],
+            PathBuf::from("/home/alice/projects/app/node_modules")
+        );
     }
 
     #[test]

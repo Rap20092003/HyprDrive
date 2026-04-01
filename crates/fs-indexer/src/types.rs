@@ -415,14 +415,20 @@ mod tests {
 
     #[test]
     fn index_cursor_from_usn_cursor() {
-        let usn = UsnCursor { journal_id: 1, next_usn: 100 };
+        let usn = UsnCursor {
+            journal_id: 1,
+            next_usn: 100,
+        };
         let cursor: IndexCursor = usn.into();
         assert!(cursor.is_usn());
     }
 
     #[test]
     fn index_cursor_from_linux_cursor() {
-        let linux = LinuxCursor { last_scan_epoch_ms: 1000, fanotify_active: true };
+        let linux = LinuxCursor {
+            last_scan_epoch_ms: 1000,
+            fanotify_active: true,
+        };
         let cursor: IndexCursor = linux.into();
         assert!(cursor.is_linux());
     }
