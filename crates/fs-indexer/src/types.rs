@@ -181,6 +181,100 @@ impl CursorStore for NoCursorStore {
     }
 }
 
+/// Unified cross-platform cursor for tracking watcher position.
+///
+/// Each platform has its own cursor mechanism. `IndexCursor` wraps them all
+/// so the daemon can store and restore cursor state without platform-specific
+/// branching at the call site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "platform")]
+pub enum IndexCursor {
+    /// Windows NTFS — USN journal position.
+    Usn(UsnCursor),
+    /// Linux — timestamp-based tracking with inotify/fanotify state.
+    Linux(LinuxCursor),
+    /// macOS — FSEvents device-scoped sinceWhen token (planned).
+    FsEvents {
+        /// FSEvents sinceWhen token (opaque u64 from FSEvents API).
+        since_when: u64,
+        /// Device UUID for the volume.
+        device_uuid: String,
+    },
+    /// Linux with fanotify — marks-based tracking (planned, requires CAP_SYS_ADMIN).
+    Fanotify {
+        /// Timestamp of last completed scan (epoch milliseconds).
+        last_scan_epoch_ms: i64,
+        /// fanotify file descriptor generation (monotonic counter).
+        generation: u64,
+    },
+}
+
+impl IndexCursor {
+    /// Create a USN cursor.
+    pub fn usn(journal_id: u64, next_usn: i64) -> Self {
+        Self::Usn(UsnCursor {
+            journal_id,
+            next_usn,
+        })
+    }
+
+    /// Create a Linux inotify cursor.
+    pub fn linux(last_scan_epoch_ms: i64, fanotify_active: bool) -> Self {
+        Self::Linux(LinuxCursor {
+            last_scan_epoch_ms,
+            fanotify_active,
+        })
+    }
+
+    /// Create an FSEvents cursor (macOS).
+    pub fn fsevents(since_when: u64, device_uuid: impl Into<String>) -> Self {
+        Self::FsEvents {
+            since_when,
+            device_uuid: device_uuid.into(),
+        }
+    }
+
+    /// Create a fanotify cursor (Linux with elevated privileges).
+    pub fn fanotify(last_scan_epoch_ms: i64, generation: u64) -> Self {
+        Self::Fanotify {
+            last_scan_epoch_ms,
+            generation,
+        }
+    }
+
+    /// Returns `true` if this is a USN (Windows) cursor.
+    pub fn is_usn(&self) -> bool {
+        matches!(self, Self::Usn(_))
+    }
+
+    /// Returns `true` if this is a Linux inotify cursor.
+    pub fn is_linux(&self) -> bool {
+        matches!(self, Self::Linux(_))
+    }
+
+    /// Serialize to JSON for storage in cursor_store table.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Deserialize from JSON (loaded from cursor_store table).
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+impl From<UsnCursor> for IndexCursor {
+    fn from(cursor: UsnCursor) -> Self {
+        Self::Usn(cursor)
+    }
+}
+
+impl From<LinuxCursor> for IndexCursor {
+    fn from(cursor: LinuxCursor) -> Self {
+        Self::Linux(cursor)
+    }
+}
+
 /// Volume scan result combining entries with cursor state.
 #[derive(Debug)]
 pub struct ScanResult {
@@ -277,6 +371,66 @@ mod tests {
         };
         assert!(result.linux_cursor.is_some());
         assert!(result.cursor.is_none());
+    }
+
+    #[test]
+    fn index_cursor_usn_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = IndexCursor::usn(42, 1000);
+        let json = cursor.to_json()?;
+        let back = IndexCursor::from_json(&json)?;
+        assert_eq!(cursor, back);
+        assert!(cursor.is_usn());
+        assert!(!cursor.is_linux());
+        Ok(())
+    }
+
+    #[test]
+    fn index_cursor_linux_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = IndexCursor::linux(1_710_600_000_000, false);
+        let json = cursor.to_json()?;
+        let back = IndexCursor::from_json(&json)?;
+        assert_eq!(cursor, back);
+        assert!(cursor.is_linux());
+        assert!(!cursor.is_usn());
+        Ok(())
+    }
+
+    #[test]
+    fn index_cursor_fsevents_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = IndexCursor::fsevents(12345, "disk0s1");
+        let json = cursor.to_json()?;
+        let back = IndexCursor::from_json(&json)?;
+        assert_eq!(cursor, back);
+        Ok(())
+    }
+
+    #[test]
+    fn index_cursor_fanotify_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = IndexCursor::fanotify(1_710_600_000_000, 7);
+        let json = cursor.to_json()?;
+        let back = IndexCursor::from_json(&json)?;
+        assert_eq!(cursor, back);
+        Ok(())
+    }
+
+    #[test]
+    fn index_cursor_from_usn_cursor() {
+        let usn = UsnCursor {
+            journal_id: 1,
+            next_usn: 100,
+        };
+        let cursor: IndexCursor = usn.into();
+        assert!(cursor.is_usn());
+    }
+
+    #[test]
+    fn index_cursor_from_linux_cursor() {
+        let linux = LinuxCursor {
+            last_scan_epoch_ms: 1000,
+            fanotify_active: true,
+        };
+        let cursor: IndexCursor = linux.into();
+        assert!(cursor.is_linux());
     }
 
     #[test]

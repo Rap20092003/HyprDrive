@@ -24,13 +24,15 @@
 
 pub mod error;
 pub mod platform;
+pub mod priority;
 pub mod types;
 
 // Re-export key types at crate root
 pub use error::{FsIndexerError, FsIndexerResult};
+pub use priority::{classify_priority, sort_by_priority, ScanPriority};
 pub use types::{
-    CursorStore, FilesystemKind, FsChange, IndexEntry, LinuxCursor, NoCursorStore, ScanResult,
-    TopoEntry, UsnCursor,
+    CursorStore, FilesystemKind, FsChange, IndexCursor, IndexEntry, LinuxCursor, NoCursorStore,
+    ScanResult, TopoEntry, UsnCursor,
 };
 
 // Re-export platform-specific scanner functions
@@ -45,6 +47,9 @@ pub use platform::windows::usn::{poll_changes, read_cursor};
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::listener::{ListenerConfig, UsnListener};
+
+#[cfg(target_os = "windows")]
+pub use platform::windows::pipe::{pipe_available, pipe_scan};
 
 // Linux platform re-exports
 #[cfg(target_os = "linux")]

@@ -1,0 +1,14 @@
+[package]
+name = "hyprdrive-ipc-protocol"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

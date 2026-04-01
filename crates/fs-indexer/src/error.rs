@@ -86,6 +86,22 @@ pub enum FsIndexerError {
         feature: String,
     },
 
+    /// Named pipe helper is not available (not running or connection failed).
+    #[error("helper pipe unavailable: {reason}")]
+    HelperUnavailable {
+        /// Why the pipe connection failed.
+        reason: String,
+    },
+
+    /// Named pipe helper returned an error response.
+    #[error("helper error ({code}): {message}")]
+    HelperError {
+        /// Error code from the helper (as string for display).
+        code: String,
+        /// Error message from the helper.
+        message: String,
+    },
+
     /// Generic I/O error.
     #[error(transparent)]
     Io(#[from] std::io::Error),
