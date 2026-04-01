@@ -108,6 +108,19 @@ pub fn sort_by_priority(paths: &mut [impl AsRef<Path>]) {
     });
 }
 
+/// Split a path string into components using both `/` and `\` as separators.
+///
+/// This ensures cross-platform compatibility: a Windows path like
+/// `C:\Users\alice\AppData` is correctly split on Linux (where `\` is not
+/// a path separator) and vice versa.
+fn split_components(path: &Path) -> Vec<String> {
+    let s = path.to_string_lossy();
+    s.split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
 /// Check if a path contains a "bulk noise" directory component.
 fn is_bulk_noise(path: &Path) -> bool {
     static NOISE_NAMES: &[&str] = &[
@@ -127,14 +140,8 @@ fn is_bulk_noise(path: &Path) -> bool {
         ".m2", // Maven
     ];
 
-    for component in path.components() {
-        let name = component.as_os_str().to_string_lossy();
-        let name_lower = name.to_ascii_lowercase();
-        if NOISE_NAMES.contains(&name_lower.as_str()) {
-            return true;
-        }
-    }
-    false
+    let components = split_components(path);
+    components.iter().any(|c| NOISE_NAMES.contains(&c.as_str()))
 }
 
 /// Check if a path contains hidden or cache directories.
@@ -150,26 +157,18 @@ fn is_hidden_cache(path: &Path) -> bool {
         "tmp",
     ];
 
-    for component in path.components() {
-        let name = component.as_os_str().to_string_lossy();
-        let name_lower = name.to_ascii_lowercase();
-        if HIDDEN_NAMES.contains(&name_lower.as_str()) {
-            return true;
-        }
-    }
-    false
+    let components = split_components(path);
+    components
+        .iter()
+        .any(|c| HIDDEN_NAMES.contains(&c.as_str()))
 }
 
 /// Check if any path component matches one of the given names.
 fn matches_any_component(path_lower: &str, names: &[&str]) -> bool {
-    // Split on both / and \ to handle cross-platform paths
-    let components: Vec<&str> = path_lower.split(['/', '\\']).collect();
-    for component in components {
-        if names.contains(&component) {
-            return true;
-        }
-    }
-    false
+    path_lower
+        .split(['/', '\\'])
+        .filter(|c| !c.is_empty())
+        .any(|component| names.contains(&component))
 }
 
 #[cfg(test)]
