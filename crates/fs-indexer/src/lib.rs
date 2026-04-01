@@ -48,6 +48,9 @@ pub use platform::windows::usn::{poll_changes, read_cursor};
 #[cfg(target_os = "windows")]
 pub use platform::windows::listener::{ListenerConfig, UsnListener};
 
+#[cfg(target_os = "windows")]
+pub use platform::windows::pipe::{pipe_available, pipe_scan};
+
 // Linux platform re-exports
 #[cfg(target_os = "linux")]
 pub use platform::linux::scanner::{auto_scan, fallback_scan, full_scan};

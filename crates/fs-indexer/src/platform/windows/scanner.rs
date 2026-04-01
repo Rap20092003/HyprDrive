@@ -235,25 +235,51 @@ pub fn fallback_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
 
 /// Auto-detect filesystem and choose the best scan strategy.
 ///
-/// - NTFS → MFT scan (fast, requires admin)
-/// - FAT32/exFAT → jwalk fallback
-/// - NTFS without admin → jwalk fallback
+/// Three-tier fallback for NTFS volumes:
+/// 1. **Named pipe** → helper process with admin privileges (fastest, no UAC prompt)
+/// 2. **Direct MFT** → works if already running as admin
+/// 3. **jwalk** → always works, slower (~3-5× vs MFT)
+///
+/// Non-NTFS volumes (FAT32, exFAT) go directly to jwalk.
 #[tracing::instrument(fields(volume = %volume.display()), skip(volume))]
 pub fn auto_scan(volume: &Path) -> FsIndexerResult<ScanResult> {
+    use crate::platform::windows::pipe;
+
     let fs_kind = detect::detect_filesystem(volume)?;
 
     match fs_kind {
-        FilesystemKind::Ntfs => match full_scan_inner(volume, fs_kind) {
-            Ok(result) => Ok(result),
-            Err(FsIndexerError::MftAccess { volume: v, .. }) => {
-                tracing::warn!(
-                    volume = %v,
-                    "MFT access denied, falling back to jwalk"
-                );
-                fallback_scan(volume)
+        FilesystemKind::Ntfs => {
+            // Tier 1: Try named pipe to elevated helper
+            match pipe::pipe_scan(volume) {
+                Ok(result) => {
+                    tracing::info!(
+                        entries = result.entries.len(),
+                        "scan completed via helper pipe"
+                    );
+                    return Ok(result);
+                }
+                Err(FsIndexerError::HelperUnavailable { reason }) => {
+                    tracing::info!(reason, "helper unavailable, trying direct MFT");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "helper error, trying direct MFT");
+                }
             }
-            Err(e) => Err(e),
-        },
+
+            // Tier 2: Try direct MFT (works if already admin)
+            match full_scan_inner(volume, fs_kind) {
+                Ok(result) => Ok(result),
+                Err(FsIndexerError::MftAccess { volume: v, .. }) => {
+                    tracing::warn!(
+                        volume = %v,
+                        "MFT access denied, falling back to jwalk"
+                    );
+                    // Tier 3: jwalk fallback
+                    fallback_scan(volume)
+                }
+                Err(e) => Err(e),
+            }
+        }
         FilesystemKind::Fat32 | FilesystemKind::ExFat => {
             tracing::info!(fs = ?fs_kind, "non-NTFS volume, using jwalk fallback");
             fallback_scan(volume)

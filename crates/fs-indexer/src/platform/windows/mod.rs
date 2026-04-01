@@ -10,6 +10,7 @@ pub mod detect;
 pub mod enrich;
 pub mod listener;
 pub mod mft;
+pub mod pipe;
 pub mod scanner;
 pub mod usn;
 pub mod util;

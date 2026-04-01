@@ -17,6 +17,7 @@ members = [
     "crates/utils",
     "crates/dedup-engine",
     "crates/object-pipeline",
+    "crates/ipc-protocol",
     "apps/daemon",
     "apps/cli",
     "helpers/hyprdrive-helper-windows",
@@ -79,6 +80,9 @@ inotify = { version = "0.11", default-features = false }
 
 # Cross-platform directory walking
 jwalk = "0.8"
+
+# IPC serialization
+rmp-serde = "1"
 
 # Testing utilities
 tempfile = "3"

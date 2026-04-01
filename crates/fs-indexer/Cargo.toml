@@ -19,6 +19,7 @@ jwalk = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 usn-journal-rs = "0.4"
+hyprdrive-ipc-protocol = { path = "../ipc-protocol" }
 windows = { version = "0.62", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
