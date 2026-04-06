@@ -247,15 +247,26 @@ pub fn group_by_size<'a>(
 
 /// Content-based duplicate scanning pipeline.
 ///
-/// 1. Size bucket
-/// 2. Partial hash within each bucket (parallel)
-/// 3. Full hash within each partial-match group (parallel)
-/// 4. Collect pairs of matching files
+/// 1. Size bucket → eliminate unique-size files
+/// 2. Partial hash (4KB) within each bucket (parallel)
+/// 3. Mid hash (1MB) for large files — catches header-identical divergence
+/// 4. Full hash within each mid/partial-match group (parallel)
+/// 5. Collect pairs of matching files
+///
+/// Buckets are processed smallest-first so small files (fast to hash)
+/// complete quickly, freeing threads for the slower large files.
 fn scan_content(all_files: &[FileEntry], min_size: u64) -> Vec<(usize, usize, MatchKind)> {
     let size_buckets = group_by_size(all_files, min_size);
+
+    // Small-files-first: sort buckets by size ascending.
+    // Small files hash quickly, freeing rayon threads faster and giving
+    // better time-to-first-result.
+    let mut sorted_buckets: Vec<_> = size_buckets.into_iter().collect();
+    sorted_buckets.sort_by_key(|(size, _)| *size);
+
     let mut result_pairs: Vec<(usize, usize, MatchKind)> = Vec::new();
 
-    for bucket in size_buckets.values() {
+    for (file_size, bucket) in &sorted_buckets {
         if bucket.len() < 2 {
             continue;
         }
@@ -281,12 +292,57 @@ fn scan_content(all_files: &[FileEntry], min_size: u64) -> Vec<(usize, usize, Ma
             partial_groups.entry(*hash).or_default().push(*idx);
         }
 
-        // Step 3: Full hash within each partial-match group
-        for group in partial_groups.values() {
-            if group.len() < 2 {
-                continue;
-            }
+        // Step 3: Mid hash for large files (>= 2MB).
+        // Files identical in first 4KB but different after that (ISO images,
+        // database files with shared headers) are caught here, avoiding the
+        // expensive full-file read.
+        let use_mid_hash = crate::hasher::should_mid_hash(*file_size);
 
+        let groups_for_full: Vec<Vec<usize>> = if use_mid_hash {
+            let mut mid_groups_out = Vec::new();
+            for group in partial_groups.values() {
+                if group.len() < 2 {
+                    continue;
+                }
+                let mid_results: Vec<Option<(usize, [u8; 32])>> = group
+                    .par_iter()
+                    .map(|&idx| match crate::hasher::mid_hash(&all_files[idx].path) {
+                        Ok(hash) => Some((idx, hash)),
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %all_files[idx].path.display(),
+                                error = %e,
+                                "Mid hash failed, skipping"
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+
+                let valid_mids: Vec<(usize, [u8; 32])> =
+                    mid_results.into_iter().flatten().collect();
+
+                let mut mid_groups: HashMap<[u8; 32], Vec<usize>> = HashMap::new();
+                for (idx, hash) in &valid_mids {
+                    mid_groups.entry(*hash).or_default().push(*idx);
+                }
+                for g in mid_groups.into_values() {
+                    if g.len() >= 2 {
+                        mid_groups_out.push(g);
+                    }
+                }
+            }
+            mid_groups_out
+        } else {
+            // Skip mid-hash for small files — go straight to full hash
+            partial_groups
+                .into_values()
+                .filter(|g| g.len() >= 2)
+                .collect()
+        };
+
+        // Step 4: Full hash within each group
+        for group in &groups_for_full {
             let full_results: Vec<Option<(usize, [u8; 32])>> = group
                 .par_iter()
                 .map(
@@ -312,12 +368,11 @@ fn scan_content(all_files: &[FileEntry], min_size: u64) -> Vec<(usize, usize, Ma
                 full_groups.entry(*hash).or_default().push(*idx);
             }
 
-            // Step 4: Emit pairs for groups with 2+ matches
+            // Step 5: Emit pairs for groups with 2+ matches
             for indices in full_groups.values() {
                 if indices.len() < 2 {
                     continue;
                 }
-                // Create pairs between all members
                 for i in 0..indices.len() {
                     for j in (i + 1)..indices.len() {
                         result_pairs.push((indices[i], indices[j], MatchKind::Content));

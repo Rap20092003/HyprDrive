@@ -796,6 +796,140 @@ pub async fn duplicate_locations(
     .await
 }
 
+// ═══ Disk intelligence — extended queries ═══
+
+/// Break down file types by category, using the file_types seed table.
+///
+/// Returns categories ordered by total bytes descending. Files with
+/// unrecognized extensions are grouped under "Other" / "#9E9E9E".
+pub async fn type_breakdown(
+    pool: &SqlitePool,
+    volume_id: &str,
+) -> Result<Vec<crate::db::types::TypeBreakdownRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COALESCE(ft.category, 'Other') AS category,
+                COALESCE(ft.color, '#9E9E9E') AS color,
+                COUNT(*) AS file_count,
+                COALESCE(SUM(l.size_bytes), 0) AS total_bytes
+         FROM locations l
+         LEFT JOIN file_types ft ON LOWER(l.extension) = ft.extension
+         WHERE l.volume_id = ?1 AND l.is_directory = 0
+         GROUP BY category, color
+         ORDER BY total_bytes DESC",
+    )
+    .bind(volume_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Find the largest files that haven't been modified in `stale_days` days.
+pub async fn stale_files(
+    pool: &SqlitePool,
+    volume_id: &str,
+    stale_days: i64,
+    limit: i64,
+) -> Result<Vec<crate::db::types::StaleFileRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.id AS location_id, l.path, l.name, l.extension,
+                l.size_bytes, l.modified_at,
+                CAST(julianday('now') - julianday(l.modified_at) AS INTEGER) AS days_stale
+         FROM locations l
+         WHERE l.volume_id = ?1 AND l.is_directory = 0
+           AND l.modified_at < datetime('now', '-' || ?2 || ' days')
+         ORDER BY l.size_bytes DESC
+         LIMIT ?3",
+    )
+    .bind(volume_id)
+    .bind(stale_days)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Find build artifact directories and their total consumed space.
+pub async fn build_artifact_waste(
+    pool: &SqlitePool,
+    volume_id: &str,
+    limit: i64,
+) -> Result<Vec<crate::db::types::BuildArtifactRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT l.path, l.name,
+                COALESCE(ds.total_bytes, 0) AS total_bytes,
+                COALESCE(ds.file_count, 0) AS file_count,
+                LOWER(l.name) AS pattern
+         FROM locations l
+         LEFT JOIN dir_sizes ds ON ds.location_id = l.id
+         WHERE l.volume_id = ?1 AND l.is_directory = 1
+           AND LOWER(l.name) IN (
+               'node_modules', 'target', '__pycache__', '.git/objects',
+               'dist', '.next', '.nuxt', 'build', '.gradle', '.cache',
+               'vendor', '.tox', '.pytest_cache', '.mypy_cache', 'egg-info'
+           )
+         ORDER BY total_bytes DESC
+         LIMIT ?2",
+    )
+    .bind(volume_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// Walk the parent_id chain upward from a location, returning all ancestor IDs.
+///
+/// Uses a recursive CTE. Results are ordered child-to-root (immediate parent first).
+pub async fn ancestor_chain(
+    pool: &SqlitePool,
+    location_id: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "WITH RECURSIVE ancestors(id, parent_id, depth) AS (
+             SELECT l.parent_id, p.parent_id, 1
+             FROM locations l
+             JOIN locations p ON l.parent_id = p.id
+             WHERE l.id = ?1 AND l.parent_id IS NOT NULL
+           UNION ALL
+             SELECT a.parent_id, p.parent_id, a.depth + 1
+             FROM ancestors a
+             JOIN locations p ON a.parent_id = p.id
+             WHERE a.parent_id IS NOT NULL
+         )
+         SELECT id FROM ancestors ORDER BY depth",
+    )
+    .bind(location_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Apply a delta to a single dir_sizes row (for live bubble-up updates).
+///
+/// If the row doesn't exist yet, it is created with the delta values.
+pub async fn apply_dir_size_delta(
+    pool: &SqlitePool,
+    location_id: &str,
+    file_count_delta: i64,
+    bytes_delta: i64,
+    allocated_delta: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dir_sizes (location_id, file_count, total_bytes, allocated_bytes, cumulative_allocated)
+         VALUES (?1, MAX(0, ?2), MAX(0, ?3), MAX(0, ?4), MAX(0, ?4))
+         ON CONFLICT(location_id) DO UPDATE SET
+             file_count = MAX(0, dir_sizes.file_count + ?2),
+             total_bytes = MAX(0, dir_sizes.total_bytes + ?3),
+             allocated_bytes = MAX(0, dir_sizes.allocated_bytes + ?4),
+             cumulative_allocated = MAX(0, dir_sizes.cumulative_allocated + ?4),
+             updated_at = datetime('now')",
+    )
+    .bind(location_id)
+    .bind(file_count_delta)
+    .bind(bytes_delta)
+    .bind(allocated_delta)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ═══ Deferred hashing queries ═══
 
 /// Count objects still pending real content hashing.
@@ -1681,5 +1815,208 @@ mod tests {
                 .await
                 .expect("oid");
         assert_eq!(oid, "obj_pres");
+    }
+
+    // ═══ Disk Intelligence Extended Query Tests ═══
+
+    #[tokio::test]
+    async fn test_type_breakdown() {
+        let (pool, _dir) = setup().await;
+        let parent_id = create_parent_dir(&pool).await;
+
+        for (i, ext) in ["jpg", "jpg", "png", "rs", "txt", "xyz"].iter().enumerate() {
+            let obj_id = format!("tobj_{i:05}");
+            let loc_id = format!("tloc_{i:05}");
+            let name = format!("file_{i}.{ext}");
+            sqlx::query("INSERT INTO objects (id, kind, size_bytes) VALUES (?1, 'File', ?2)")
+                .bind(&obj_id)
+                .bind((i as i64 + 1) * 1000)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id, size_bytes, created_at, modified_at)
+                 VALUES (?1, ?2, 'vol1', ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
+            )
+            .bind(&loc_id)
+            .bind(&obj_id)
+            .bind(format!("/test/{name}"))
+            .bind(&name)
+            .bind(ext)
+            .bind(&parent_id)
+            .bind((i as i64 + 1) * 1000)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let rows = type_breakdown(&pool, "vol1").await.unwrap();
+        assert!(!rows.is_empty());
+        // Image files may be split across sub-categories (different colors per extension)
+        let image_total: i64 = rows
+            .iter()
+            .filter(|r| r.category == "Image")
+            .map(|r| r.file_count)
+            .sum();
+        assert!(
+            image_total >= 3,
+            "expected >= 3 Image files, got {image_total}"
+        ); // 2 jpg + 1 png
+    }
+
+    #[tokio::test]
+    async fn test_stale_files() {
+        let (pool, _dir) = setup().await;
+        let parent_id = create_parent_dir(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes) VALUES ('stale_obj', 'File', 50000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id, size_bytes, created_at, modified_at)
+             VALUES ('stale_loc', 'stale_obj', 'vol1', '/test/old.zip', 'old.zip', 'zip', ?1, 50000, datetime('now'), datetime('now', '-400 days'))",
+        )
+        .bind(&parent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes) VALUES ('fresh_obj', 'File', 10000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, extension, parent_id, size_bytes, created_at, modified_at)
+             VALUES ('fresh_loc', 'fresh_obj', 'vol1', '/test/new.zip', 'new.zip', 'zip', ?1, 10000, datetime('now'), datetime('now'))",
+        )
+        .bind(&parent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let stale = stale_files(&pool, "vol1", 365, 10).await.unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "old.zip");
+        assert!(stale[0].days_stale >= 365);
+    }
+
+    #[tokio::test]
+    async fn test_build_artifact_waste() {
+        let (pool, _dir) = setup().await;
+
+        sqlx::query("INSERT INTO objects (id, kind, size_bytes) VALUES ('nm_obj', 'Directory', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory, created_at, modified_at)
+             VALUES ('nm_loc', 'nm_obj', 'vol1', '/project/node_modules', 'node_modules', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO dir_sizes (location_id, file_count, total_bytes, allocated_bytes, cumulative_allocated)
+             VALUES ('nm_loc', 5000, 200000000, 210000000, 210000000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let artifacts = build_artifact_waste(&pool, "vol1", 10).await.unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "node_modules");
+        assert_eq!(artifacts[0].total_bytes, 200_000_000);
+        assert_eq!(artifacts[0].file_count, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_ancestor_chain() {
+        let (pool, _dir) = setup().await;
+
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes) VALUES ('root_obj', 'Directory', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory, created_at, modified_at)
+             VALUES ('root_loc', 'root_obj', 'vol1', '/root', 'root', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes) VALUES ('mid_obj', 'Directory', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory, parent_id, created_at, modified_at)
+             VALUES ('mid_loc', 'mid_obj', 'vol1', '/root/mid', 'mid', 1, 'root_loc', datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO objects (id, kind, size_bytes) VALUES ('leaf_obj', 'File', 1024)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, parent_id, created_at, modified_at)
+             VALUES ('leaf_loc', 'leaf_obj', 'vol1', '/root/mid/leaf.txt', 'leaf.txt', 'mid_loc', datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let chain = ancestor_chain(&pool, "leaf_loc").await.unwrap();
+        assert_eq!(chain, vec!["mid_loc".to_string(), "root_loc".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_apply_dir_size_delta() {
+        let (pool, _dir) = setup().await;
+        let parent_id = create_parent_dir(&pool).await;
+
+        apply_dir_size_delta(&pool, &parent_id, 5, 10240, 12288)
+            .await
+            .unwrap();
+
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT file_count, total_bytes, cumulative_allocated FROM dir_sizes WHERE location_id = ?1",
+        )
+        .bind(&parent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, 5);
+        assert_eq!(row.1, 10240);
+        assert_eq!(row.2, 12288);
+
+        apply_dir_size_delta(&pool, &parent_id, 3, 4096, 4096)
+            .await
+            .unwrap();
+
+        let row2: (i64, i64, i64) = sqlx::query_as(
+            "SELECT file_count, total_bytes, cumulative_allocated FROM dir_sizes WHERE location_id = ?1",
+        )
+        .bind(&parent_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row2.0, 8);
+        assert_eq!(row2.1, 14336);
+        assert_eq!(row2.2, 16384);
     }
 }

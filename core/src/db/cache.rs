@@ -9,7 +9,7 @@
 //! 5. DIR_SIZE_CACHE: location_id → DirSizeRecord
 //! 6. USN_CURSORS: volume_key → JSON UsnCursor (Phase 3.5)
 
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -349,6 +349,69 @@ pub mod dir_size {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Bulk-insert directory size records into redb cache.
+    ///
+    /// Single write transaction for all entries. Overwrites existing records.
+    pub fn populate_batch(
+        db: &Database,
+        entries: &[(String, DirSizeRecord)],
+    ) -> Result<(), redb::Error> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(DIR_SIZE_CACHE)?;
+            for (location_id, record) in entries {
+                let json = serde_json::to_string(record).map_err(|e| {
+                    redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                })?;
+                table.insert(location_id.as_str(), json.as_str())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Apply a delta to a cached directory size record (read-modify-write).
+    ///
+    /// If the record doesn't exist, creates a new one with the delta values.
+    pub fn apply_delta(
+        db: &Database,
+        location_id: &str,
+        file_count_delta: i64,
+        bytes_delta: i64,
+        allocated_delta: i64,
+    ) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(DIR_SIZE_CACHE)?;
+            let existing: Option<DirSizeRecord> = match table.get(location_id)? {
+                Some(v) => serde_json::from_str(v.value()).ok(),
+                None => None,
+            };
+            let updated = match existing {
+                Some(rec) => DirSizeRecord {
+                    file_count: (rec.file_count as i64 + file_count_delta).max(0) as u64,
+                    total_bytes: (rec.total_bytes as i64 + bytes_delta).max(0) as u64,
+                    cumulative_allocated: (rec.cumulative_allocated as i64 + allocated_delta).max(0)
+                        as u64,
+                },
+                None => DirSizeRecord {
+                    file_count: file_count_delta.max(0) as u64,
+                    total_bytes: bytes_delta.max(0) as u64,
+                    cumulative_allocated: allocated_delta.max(0) as u64,
+                },
+            };
+            let json = serde_json::to_string(&updated).map_err(|e| {
+                redb::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            })?;
+            table.insert(location_id, json.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -635,5 +698,89 @@ mod tests {
         let result = dir_size::get(&db, "loc1").expect("get").expect("some");
         assert_eq!(result.file_count, 20);
         assert_eq!(result.cumulative_allocated, 5000);
+    }
+
+    #[test]
+    fn test_dir_size_populate_batch() {
+        let (db, _dir) = test_db();
+        let entries = vec![
+            (
+                "loc_a".to_string(),
+                DirSizeRecord {
+                    file_count: 10,
+                    total_bytes: 5000,
+                    cumulative_allocated: 8000,
+                },
+            ),
+            (
+                "loc_b".to_string(),
+                DirSizeRecord {
+                    file_count: 20,
+                    total_bytes: 10000,
+                    cumulative_allocated: 16000,
+                },
+            ),
+        ];
+        dir_size::populate_batch(&db, &entries).unwrap();
+
+        let a = dir_size::get(&db, "loc_a").unwrap().unwrap();
+        assert_eq!(a.file_count, 10);
+        assert_eq!(a.total_bytes, 5000);
+
+        let b = dir_size::get(&db, "loc_b").unwrap().unwrap();
+        assert_eq!(b.file_count, 20);
+        assert_eq!(b.cumulative_allocated, 16000);
+    }
+
+    #[test]
+    fn test_dir_size_populate_batch_empty() {
+        let (db, _dir) = test_db();
+        dir_size::populate_batch(&db, &[]).unwrap();
+    }
+
+    #[test]
+    fn test_dir_size_apply_delta_new_record() {
+        let (db, _dir) = test_db();
+        dir_size::apply_delta(&db, "loc_new", 5, 4096, 8192).unwrap();
+        let r = dir_size::get(&db, "loc_new").unwrap().unwrap();
+        assert_eq!(r.file_count, 5);
+        assert_eq!(r.total_bytes, 4096);
+        assert_eq!(r.cumulative_allocated, 8192);
+    }
+
+    #[test]
+    fn test_dir_size_apply_delta_existing() {
+        let (db, _dir) = test_db();
+        let initial = DirSizeRecord {
+            file_count: 10,
+            total_bytes: 1000,
+            cumulative_allocated: 2000,
+        };
+        dir_size::upsert(&db, "loc_x", &initial).unwrap();
+
+        dir_size::apply_delta(&db, "loc_x", 3, 500, 1000).unwrap();
+
+        let r = dir_size::get(&db, "loc_x").unwrap().unwrap();
+        assert_eq!(r.file_count, 13);
+        assert_eq!(r.total_bytes, 1500);
+        assert_eq!(r.cumulative_allocated, 3000);
+    }
+
+    #[test]
+    fn test_dir_size_apply_delta_negative_floors_at_zero() {
+        let (db, _dir) = test_db();
+        let initial = DirSizeRecord {
+            file_count: 2,
+            total_bytes: 100,
+            cumulative_allocated: 200,
+        };
+        dir_size::upsert(&db, "loc_y", &initial).unwrap();
+
+        dir_size::apply_delta(&db, "loc_y", -10, -500, -1000).unwrap();
+
+        let r = dir_size::get(&db, "loc_y").unwrap().unwrap();
+        assert_eq!(r.file_count, 0);
+        assert_eq!(r.total_bytes, 0);
+        assert_eq!(r.cumulative_allocated, 0);
     }
 }
