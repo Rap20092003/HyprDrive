@@ -15,6 +15,21 @@ use crate::types::TopoEntry;
 use std::ffi::OsString;
 use std::path::Path;
 
+/// Extract the 48-bit MFT record number from a full 64-bit NTFS File Reference.
+///
+/// NTFS File Reference Numbers (FRNs) are structured as:
+/// - Bits 0–47: MFT record number (the actual file identity)
+/// - Bits 48–63: Sequence number (incremented when the MFT record is reused)
+///
+/// `usn-journal-rs` returns raw 64-bit FRNs from `USN_RECORD_V2`. The sequence
+/// number can differ between a directory's own FRN and the parent reference
+/// stored in child entries, so all parent-map operations must use the masked
+/// record number to ensure consistent lookups.
+#[inline]
+pub(crate) fn record_number(frn: u64) -> u64 {
+    frn & 0x0000_FFFF_FFFF_FFFF
+}
+
 /// Minimum FRN for user files. FRNs 0–23 are NTFS metadata files
 /// ($MFT, $MFTMirr, $LogFile, $Volume, $AttrDef, ., $Bitmap, $Boot,
 /// $BadClus, $Secure, $UpCase, $Extend, and reserved entries).
@@ -64,8 +79,10 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
             }
         };
 
-        // Skip NTFS metadata files (FRN < 24)
-        if mft_entry.fid < MIN_USER_FRN {
+        // Skip NTFS metadata files (record number < 24).
+        // Must use record_number() because raw fid includes sequence number
+        // in upper 16 bits, making even metadata FRNs appear > 24.
+        if record_number(mft_entry.fid) < MIN_USER_FRN {
             continue;
         }
 
@@ -96,11 +113,13 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
 
 /// Build a parent-FRN lookup map from topology entries.
 ///
-/// Returns a map from FRN → (parent_fid, name) for path reconstruction.
+/// Keys and parent references use masked 48-bit record numbers (via
+/// [`record_number`]) to handle sequence-number mismatches between a
+/// directory's own FRN and the parent reference stored in child entries.
 pub fn build_parent_map(entries: &[TopoEntry]) -> std::collections::HashMap<u64, (u64, OsString)> {
     entries
         .iter()
-        .map(|e| (e.fid, (e.parent_fid, e.name.clone())))
+        .map(|e| (record_number(e.fid), (record_number(e.parent_fid), e.name.clone())))
         .collect()
 }
 
@@ -114,7 +133,7 @@ pub fn reconstruct_path(
     volume_root: &Path,
 ) -> Option<std::path::PathBuf> {
     let mut components = Vec::new();
-    let mut current = fid;
+    let mut current = record_number(fid);
     let mut reached_root = false;
 
     // Walk up the parent chain (max depth to prevent infinite loops)
@@ -165,7 +184,9 @@ pub fn reconstruct_paths_cached(
     let mut result = std::collections::HashMap::with_capacity(fids.len());
 
     for &fid in fids {
-        if let Some(path) = reconstruct_path_memo(fid, parent_map, volume_root, &mut cache) {
+        let rec = record_number(fid);
+        if let Some(path) = reconstruct_path_memo(rec, parent_map, volume_root, &mut cache) {
+            // Map original fid → path so callers can look up by raw fid
             result.insert(fid, path);
         }
     }
@@ -455,8 +476,9 @@ mod tests {
                 assert!(e.len() > 10_000, "expected > 10k entries, got {}", e.len());
                 for entry in &e {
                     assert!(
-                        entry.fid >= MIN_USER_FRN,
-                        "FRN {} < {}",
+                        record_number(entry.fid) >= MIN_USER_FRN,
+                        "record number {} (FRN 0x{:016X}) < {}",
+                        record_number(entry.fid),
                         entry.fid,
                         MIN_USER_FRN
                     );
@@ -468,5 +490,84 @@ mod tests {
                 eprintln!("MFT enumeration failed (expected without admin): {e}");
             }
         }
+    }
+
+    #[test]
+    fn record_number_masks_sequence_bits() {
+        // Record 5, sequence 1
+        assert_eq!(record_number(0x0001_0000_0000_0005), 5);
+        // Record 100, sequence 3
+        assert_eq!(record_number(0x0003_0000_0000_0064), 100);
+        // Record number only (no sequence) — unchanged
+        assert_eq!(record_number(42), 42);
+        // Max record number (48 bits)
+        assert_eq!(record_number(0xFFFF_FFFF_FFFF_FFFF), 0x0000_FFFF_FFFF_FFFF);
+    }
+
+    #[test]
+    fn build_parent_map_masks_sequence_numbers() {
+        // Simulate real NTFS FRNs with sequence numbers in upper 16 bits
+        let entries = vec![
+            TopoEntry {
+                fid: 0x0001_0000_0000_0064, // record 100, seq 1
+                parent_fid: 0x0005_0000_0000_0005, // record 5, seq 5
+                name: OsString::from("Users"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 0x0002_0000_0000_00C8, // record 200, seq 2
+                parent_fid: 0x0003_0000_0000_0064, // record 100, seq 3 (DIFFERENT from fid seq!)
+                name: OsString::from("file.txt"),
+                is_dir: false,
+                attributes: 0,
+            },
+        ];
+
+        let map = build_parent_map(&entries);
+        // Keys should be masked record numbers
+        assert!(map.contains_key(&100), "should find record 100");
+        assert!(map.contains_key(&200), "should find record 200");
+        // Parent refs should also be masked
+        let (parent_of_100, _) = &map[&100];
+        assert_eq!(*parent_of_100, 5, "parent should be record 5");
+        let (parent_of_200, _) = &map[&200];
+        assert_eq!(*parent_of_200, 100, "parent should be record 100");
+    }
+
+    #[test]
+    fn path_reconstruction_with_sequence_mismatches() {
+        // Simulate the real-world bug: root has seq=5 in its own FRN,
+        // but children reference it with seq=3 in their parent_fid.
+        let topo_entries = vec![
+            TopoEntry {
+                fid: 0x0001_0000_0000_0064, // record 100, seq 1
+                parent_fid: 0x0005_0000_0000_0005, // root record 5, seq 5
+                name: OsString::from("Users"),
+                is_dir: true,
+                attributes: FILE_ATTRIBUTE_DIRECTORY,
+            },
+            TopoEntry {
+                fid: 0x0002_0000_0000_00C8, // record 200, seq 2
+                parent_fid: 0x0003_0000_0000_0064, // record 100, seq 3 (mismatched!)
+                name: OsString::from("report.pdf"),
+                is_dir: false,
+                attributes: 0,
+            },
+        ];
+
+        let mut parent_map = build_parent_map(&topo_entries);
+        // Inject root with record number 5 (as scanner.rs would do)
+        parent_map.insert(5, (5, OsString::new()));
+
+        // Both entries should resolve despite sequence mismatches
+        let result = reconstruct_paths_cached(
+            &[0x0002_0000_0000_00C8, 0x0001_0000_0000_0064],
+            &parent_map,
+            Path::new("C:\\"),
+        );
+        assert_eq!(result.len(), 2, "both entries should resolve");
+        let path = result[&0x0002_0000_0000_00C8].to_string_lossy();
+        assert_eq!(path, r"C:\Users\report.pdf");
     }
 }
