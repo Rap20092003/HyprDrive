@@ -42,18 +42,32 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 use super::util::drive_letter_from_path;
 
+/// Result of MFT topology enumeration, split into user entries and
+/// metadata entries needed for parent-chain resolution.
+pub struct MftTopology {
+    /// User file entries (record number ≥ 24) — these become the scan output.
+    pub user_entries: Vec<TopoEntry>,
+    /// NTFS metadata entries (record number < 24, e.g. root, $Extend) — needed
+    /// in the parent map so user entries can resolve full paths, but excluded
+    /// from scan output.
+    pub metadata_entries: Vec<TopoEntry>,
+}
+
 /// Enumerate the MFT topology of an NTFS volume.
 ///
-/// Returns all user file entries (FRN ≥ 24) as [`TopoEntry`] values.
-/// System metadata files ($MFT, $LogFile, etc.) are skipped.
-/// Reparse points (NTFS junctions, symlinks) are flagged but not followed.
+/// Returns user file entries (FRN ≥ 24) and metadata entries (FRN < 24)
+/// separately. Metadata entries are needed for parent-chain resolution
+/// (e.g. root directory record 5, $Extend record 11) but should not appear
+/// in the final scan output.
+///
+/// Reparse points (NTFS junctions, symlinks) are skipped entirely.
 ///
 /// # Errors
 ///
 /// Returns [`FsIndexerError::MftAccess`] if the volume cannot be opened
 /// (typically requires admin/elevated privileges).
 #[tracing::instrument(fields(volume = %volume.display()), skip(volume))]
-pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> {
+pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<MftTopology> {
     let letter = drive_letter_from_path(volume)?;
 
     tracing::info!(drive = %letter, "starting MFT topology enumeration");
@@ -68,7 +82,8 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
     let mft = usn_journal_rs::mft::Mft::new(&vol);
     let mft_iter = mft.iter();
 
-    let mut entries = Vec::new();
+    let mut user_entries = Vec::new();
+    let mut metadata_entries = Vec::new();
 
     for result in mft_iter {
         let mft_entry = match result {
@@ -78,13 +93,6 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
                 continue;
             }
         };
-
-        // Skip NTFS metadata files (record number < 24).
-        // Must use record_number() because raw fid includes sequence number
-        // in upper 16 bits, making even metadata FRNs appear > 24.
-        if record_number(mft_entry.fid) < MIN_USER_FRN {
-            continue;
-        }
 
         let is_dir = (mft_entry.file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         let is_reparse = (mft_entry.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
@@ -98,17 +106,30 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
             continue;
         }
 
-        entries.push(TopoEntry {
+        let entry = TopoEntry {
             fid: mft_entry.fid,
             parent_fid: mft_entry.parent_fid,
             name: mft_entry.file_name,
             is_dir,
             attributes: mft_entry.file_attributes,
-        });
+        };
+
+        if record_number(mft_entry.fid) < MIN_USER_FRN {
+            metadata_entries.push(entry);
+        } else {
+            user_entries.push(entry);
+        }
     }
 
-    tracing::info!(count = entries.len(), "MFT topology enumeration complete");
-    Ok(entries)
+    tracing::info!(
+        user = user_entries.len(),
+        metadata = metadata_entries.len(),
+        "MFT topology enumeration complete"
+    );
+    Ok(MftTopology {
+        user_entries,
+        metadata_entries,
+    })
 }
 
 /// Build a parent-FRN lookup map from topology entries.
@@ -119,7 +140,12 @@ pub fn mft_enumerate_topology(volume: &Path) -> FsIndexerResult<Vec<TopoEntry>> 
 pub fn build_parent_map(entries: &[TopoEntry]) -> std::collections::HashMap<u64, (u64, OsString)> {
     entries
         .iter()
-        .map(|e| (record_number(e.fid), (record_number(e.parent_fid), e.name.clone())))
+        .map(|e| {
+            (
+                record_number(e.fid),
+                (record_number(e.parent_fid), e.name.clone()),
+            )
+        })
         .collect()
 }
 
@@ -470,11 +496,15 @@ mod tests {
     #[test]
     #[ignore]
     fn mft_enumerate_returns_entries() {
-        let entries = mft_enumerate_topology(Path::new("C:\\"));
-        match entries {
-            Ok(e) => {
-                assert!(e.len() > 10_000, "expected > 10k entries, got {}", e.len());
-                for entry in &e {
+        let topology = mft_enumerate_topology(Path::new("C:\\"));
+        match topology {
+            Ok(topo) => {
+                assert!(
+                    topo.user_entries.len() > 10_000,
+                    "expected > 10k user entries, got {}",
+                    topo.user_entries.len()
+                );
+                for entry in &topo.user_entries {
                     assert!(
                         record_number(entry.fid) >= MIN_USER_FRN,
                         "record number {} (FRN 0x{:016X}) < {}",
@@ -483,8 +513,13 @@ mod tests {
                         MIN_USER_FRN
                     );
                 }
-                let dir_count = e.iter().filter(|e| e.is_dir).count();
+                let dir_count = topo.user_entries.iter().filter(|e| e.is_dir).count();
                 assert!(dir_count > 0, "expected at least some directories");
+                // Metadata entries should include root (record 5)
+                assert!(
+                    !topo.metadata_entries.is_empty(),
+                    "should have metadata entries"
+                );
             }
             Err(e) => {
                 eprintln!("MFT enumeration failed (expected without admin): {e}");
@@ -509,14 +544,14 @@ mod tests {
         // Simulate real NTFS FRNs with sequence numbers in upper 16 bits
         let entries = vec![
             TopoEntry {
-                fid: 0x0001_0000_0000_0064, // record 100, seq 1
+                fid: 0x0001_0000_0000_0064,        // record 100, seq 1
                 parent_fid: 0x0005_0000_0000_0005, // record 5, seq 5
                 name: OsString::from("Users"),
                 is_dir: true,
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
             },
             TopoEntry {
-                fid: 0x0002_0000_0000_00C8, // record 200, seq 2
+                fid: 0x0002_0000_0000_00C8,        // record 200, seq 2
                 parent_fid: 0x0003_0000_0000_0064, // record 100, seq 3 (DIFFERENT from fid seq!)
                 name: OsString::from("file.txt"),
                 is_dir: false,
@@ -541,14 +576,14 @@ mod tests {
         // but children reference it with seq=3 in their parent_fid.
         let topo_entries = vec![
             TopoEntry {
-                fid: 0x0001_0000_0000_0064, // record 100, seq 1
+                fid: 0x0001_0000_0000_0064,        // record 100, seq 1
                 parent_fid: 0x0005_0000_0000_0005, // root record 5, seq 5
                 name: OsString::from("Users"),
                 is_dir: true,
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
             },
             TopoEntry {
-                fid: 0x0002_0000_0000_00C8, // record 200, seq 2
+                fid: 0x0002_0000_0000_00C8,        // record 200, seq 2
                 parent_fid: 0x0003_0000_0000_0064, // record 100, seq 3 (mismatched!)
                 name: OsString::from("report.pdf"),
                 is_dir: false,

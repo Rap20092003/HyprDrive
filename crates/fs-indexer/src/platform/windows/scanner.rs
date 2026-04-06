@@ -35,40 +35,43 @@ fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<Sc
         return Err(FsIndexerError::UnsupportedFs { kind: fs_kind });
     }
 
-    // Phase 1: MFT topology
-    let topo_entries = mft::mft_enumerate_topology(volume)?;
+    // Phase 1: MFT topology — returns user entries (FRN ≥ 24) and metadata
+    // entries (FRN < 24) separately. Metadata entries (root, $Extend, etc.)
+    // are needed in the parent map for chain resolution but excluded from output.
+    let topology = mft::mft_enumerate_topology(volume)?;
+    let topo_entries = topology.user_entries;
     let topo_count = topo_entries.len();
-    tracing::info!(entries = topo_count, "topology pass complete");
+    tracing::info!(
+        user_entries = topo_count,
+        metadata_entries = topology.metadata_entries.len(),
+        "topology pass complete"
+    );
 
-    // Build parent map for path reconstruction
-    let mut parent_map = mft::build_parent_map(&topo_entries);
-
-    // Ensure the NTFS root directory (record number 5) is in the parent map
-    // as a self-referencing entry. build_parent_map() now uses masked 48-bit
-    // record numbers, so the root should already be filtered out by
-    // MIN_USER_FRN. We still do dynamic detection as a safety net: find the
-    // most-referenced parent record number not present in the map.
-    {
-        let mut missing_parents: std::collections::HashMap<u64, usize> =
-            std::collections::HashMap::new();
-        for entry in &topo_entries {
-            let parent_rec = mft::record_number(entry.parent_fid);
-            if !parent_map.contains_key(&parent_rec) {
-                *missing_parents.entry(parent_rec).or_default() += 1;
-            }
-        }
-        if let Some((&root_rec, &count)) = missing_parents.iter().max_by_key(|(_, c)| *c) {
-            tracing::info!(
-                root_record = root_rec,
-                root_hex = format!("0x{:012X}", root_rec),
-                references = count,
-                "detected NTFS root record number dynamically"
-            );
-            parent_map.insert(root_rec, (root_rec, OsString::new()));
-        } else {
-            tracing::warn!("no missing parent record detected — root may already be in map");
-        }
+    // Build parent map from ALL entries (user + metadata) so parent chains
+    // can resolve through metadata directories like root(5) and $Extend(11).
+    let all_entries: Vec<&crate::types::TopoEntry> = topology
+        .metadata_entries
+        .iter()
+        .chain(topo_entries.iter())
+        .collect();
+    let mut parent_map = std::collections::HashMap::with_capacity(all_entries.len());
+    for entry in &all_entries {
+        parent_map.insert(
+            mft::record_number(entry.fid),
+            (mft::record_number(entry.parent_fid), entry.name.clone()),
+        );
     }
+
+    // Ensure root (record 5) is self-referencing in the parent map.
+    // It should already be there from metadata_entries, but the MFT entry
+    // for record 5 has parent_fid=5 (self-ref), so it works automatically.
+    // This is a safety net in case it's somehow missing.
+    const NTFS_ROOT_RECORD: u64 = 5;
+    parent_map
+        .entry(NTFS_ROOT_RECORD)
+        .or_insert((NTFS_ROOT_RECORD, OsString::new()));
+
+    tracing::info!(parent_map_size = parent_map.len(), "parent map built");
 
     // Phase 2: Convert to IndexEntry with paths, then enrich sizes
     // Use memoized path reconstruction — much faster for large trees because
@@ -331,6 +334,115 @@ mod tests {
             scan.entries.len() >= 10,
             "expected >= 10 entries, got {}",
             scan.entries.len()
+        );
+    }
+
+    /// Diagnostic test — dumps intermediate pipeline state to find where entries are lost.
+    /// Run: `cargo test -p hyprdrive-fs-indexer -- --ignored full_scan_diagnostic --nocapture`
+    #[test]
+    #[ignore]
+    fn full_scan_diagnostic() {
+        use crate::platform::windows::mft;
+
+        let volume = Path::new("C:\\");
+
+        // Step 1: Raw MFT enumeration (now returns user + metadata separately)
+        let topology = mft::mft_enumerate_topology(volume).expect("MFT enum failed");
+        let user_count = topology.user_entries.len();
+        let meta_count = topology.metadata_entries.len();
+        let dirs = topology.user_entries.iter().filter(|e| e.is_dir).count();
+        let files = topology.user_entries.iter().filter(|e| !e.is_dir).count();
+        eprintln!("=== MFT TOPOLOGY ===");
+        eprintln!("  User entries:     {user_count}");
+        eprintln!("  Metadata entries: {meta_count}");
+        eprintln!("  Directories:      {dirs}");
+        eprintln!("  Files:            {files}");
+
+        // Step 2: Build parent map from ALL entries (user + metadata)
+        let mut parent_map = mft::build_parent_map(&topology.metadata_entries);
+        let user_map = mft::build_parent_map(&topology.user_entries);
+        parent_map.extend(user_map);
+        eprintln!("\n=== PARENT MAP ===");
+        eprintln!("  Map size: {}", parent_map.len());
+
+        // Ensure root is self-referencing
+        const NTFS_ROOT_RECORD: u64 = 5;
+        parent_map
+            .entry(NTFS_ROOT_RECORD)
+            .or_insert((NTFS_ROOT_RECORD, std::ffi::OsString::new()));
+
+        // Step 3: Find missing parents
+        let mut missing_parents: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for entry in topology
+            .metadata_entries
+            .iter()
+            .chain(topology.user_entries.iter())
+        {
+            let parent_rec = mft::record_number(entry.parent_fid);
+            if !parent_map.contains_key(&parent_rec) {
+                *missing_parents.entry(parent_rec).or_default() += 1;
+            }
+        }
+        eprintln!("\n=== MISSING PARENTS (after metadata inclusion) ===");
+        eprintln!(
+            "  Distinct missing parent records: {}",
+            missing_parents.len()
+        );
+        let mut sorted_missing: Vec<_> = missing_parents.iter().collect();
+        sorted_missing.sort_by(|a, b| b.1.cmp(a.1));
+        for (rec, count) in sorted_missing.iter().take(10) {
+            eprintln!("  record={rec} (0x{rec:012X}) referenced by {count} entries");
+        }
+
+        // Step 4: Show metadata entries
+        eprintln!("\n=== METADATA ENTRIES ===");
+        for entry in &topology.metadata_entries {
+            let rec = mft::record_number(entry.fid);
+            let parent_rec = mft::record_number(entry.parent_fid);
+            eprintln!(
+                "  rec={rec} parent={parent_rec} dir={} name={}",
+                entry.is_dir,
+                entry.name.to_string_lossy()
+            );
+        }
+
+        // Step 5: Path reconstruction (user entries only)
+        let fids: Vec<u64> = topology.user_entries.iter().map(|t| t.fid).collect();
+        let path_cache = mft::reconstruct_paths_cached(&fids, &parent_map, volume);
+        let resolved = path_cache.len();
+        let orphans = user_count - resolved;
+        eprintln!("\n=== PATH RECONSTRUCTION ===");
+        eprintln!("  Resolved: {resolved}");
+        eprintln!("  Orphans:  {orphans}");
+
+        // Show some sample resolved paths
+        let mut sample_paths: Vec<_> = path_cache.values().take(20).collect();
+        sample_paths.sort();
+        eprintln!("\n=== SAMPLE RESOLVED PATHS (first 20) ===");
+        for p in &sample_paths {
+            eprintln!("  {}", p.display());
+        }
+
+        // Show some orphan entries
+        eprintln!("\n=== SAMPLE ORPHAN ENTRIES (first 10) ===");
+        let mut orphan_samples = 0;
+        for entry in &topology.user_entries {
+            if !path_cache.contains_key(&entry.fid) && orphan_samples < 10 {
+                let rec = mft::record_number(entry.fid);
+                let parent_rec = mft::record_number(entry.parent_fid);
+                let parent_in_map = parent_map.contains_key(&parent_rec);
+                eprintln!(
+                    "  fid=0x{:012X} rec={rec} parent_rec={parent_rec} parent_in_map={parent_in_map} name={}",
+                    entry.fid, entry.name.to_string_lossy()
+                );
+                orphan_samples += 1;
+            }
+        }
+
+        eprintln!(
+            "\n=== SUMMARY ===\n  Topo: {user_count} → Resolved: {resolved} → Lost: {orphans} ({:.1}%)",
+            orphans as f64 / user_count as f64 * 100.0
         );
     }
 
