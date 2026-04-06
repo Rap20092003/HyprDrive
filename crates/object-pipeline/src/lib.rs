@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```text
 //! let config = PipelineConfig::new("volume-id".into());
 //! let pipeline = ObjectPipeline::new(config, pool, cache);
 //! let stats = pipeline.process_entries(&scan_result.entries).await?;
