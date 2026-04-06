@@ -157,7 +157,7 @@ fn platform_reflink(source: &Path, dest: &Path, length: u64) -> DeduplicateResul
         reserved2: 0,
     };
 
-    let info = FileDedupRangeInfo {
+    let mut info = FileDedupRangeInfo {
         dest_fd: dest_file.as_raw_fd() as i64,
         dest_offset: 0,
         bytes_deduped: 0,
