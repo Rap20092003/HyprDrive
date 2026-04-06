@@ -48,7 +48,7 @@ pub struct BackgroundHashResult {
 /// Run the background hasher until all deferred objects are upgraded or cancellation is requested.
 ///
 /// This is meant to be spawned as a tokio task:
-/// ```ignore
+/// ```text
 /// let cancel = CancellationToken::new();
 /// let handle = tokio::spawn(run_background_hasher(config, pool, cache, cancel.clone()));
 /// // Later: cancel.cancel(); handle.await;
