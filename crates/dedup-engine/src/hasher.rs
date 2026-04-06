@@ -1,11 +1,13 @@
 //! Progressive BLAKE3 file hashing.
 //!
-//! Three tiers of hashing for efficient duplicate elimination:
+//! Four tiers of hashing for efficient duplicate elimination:
 //! 1. **Partial hash**: First 4KB only — cheap, eliminates most non-duplicates.
-//! 2. **Full hash**: Streaming 64KB chunks — confirms exact content match.
-//! 3. **Full hash mmap**: Memory-mapped for files > 512MB — avoids heap allocation.
+//! 2. **Mid hash**: First 1MB — catches header-identical files (ISO, DB, etc.).
+//! 3. **Full hash**: Streaming 64KB chunks — confirms exact content match.
+//! 4. **Full hash mmap**: Memory-mapped for files > 512MB — avoids heap allocation.
 
 use crate::error::DeduplicateResult;
+use std::cell::RefCell;
 use std::io::Read;
 use std::path::Path;
 
@@ -15,8 +17,28 @@ const MMAP_THRESHOLD: u64 = 512 * 1024 * 1024;
 /// Size of the partial hash read (4 KB).
 const PARTIAL_HASH_SIZE: usize = 4096;
 
+/// Size of the mid-hash read (1 MB).
+///
+/// Files with identical first 4KB but different content after that
+/// (e.g. ISO images, database files with shared headers) are caught here,
+/// avoiding the full-file read.
+const MID_HASH_SIZE: usize = 1024 * 1024;
+
 /// Size of streaming hash chunks (64 KB).
 const CHUNK_SIZE: usize = 64 * 1024;
+
+/// Minimum file size for the mid-hash stage to be useful.
+///
+/// Files smaller than this go straight from partial to full hash,
+/// since mid-hash would read most of the file anyway.
+const MID_HASH_MIN_FILE_SIZE: u64 = MID_HASH_SIZE as u64 * 2;
+
+// Thread-local reusable buffers to avoid per-call heap allocation.
+// Pattern borrowed from Czkawka's thread-local 2MB buffer approach.
+thread_local! {
+    static CHUNK_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; CHUNK_SIZE]);
+    static MID_BUF: RefCell<Vec<u8>> = RefCell::new(vec![0u8; MID_HASH_SIZE]);
+}
 
 /// Compute a partial hash of a file (first 4KB).
 ///
@@ -25,15 +47,41 @@ const CHUNK_SIZE: usize = 64 * 1024;
 #[tracing::instrument(skip_all, fields(path = %path.display()))]
 pub fn partial_hash(path: &Path) -> DeduplicateResult<[u8; 32]> {
     let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; PARTIAL_HASH_SIZE];
+    let mut buf = [0u8; PARTIAL_HASH_SIZE];
     let n = file.read(&mut buf)?;
-    buf.truncate(n);
-    Ok(*blake3::hash(&buf).as_bytes())
+    Ok(*blake3::hash(&buf[..n]).as_bytes())
+}
+
+/// Compute a mid-level hash of a file (first 1MB).
+///
+/// Catches files that share the same first 4KB header but diverge later.
+/// Only useful for files >= 2MB; smaller files should skip to full hash.
+#[tracing::instrument(skip_all, fields(path = %path.display()))]
+pub fn mid_hash(path: &Path) -> DeduplicateResult<[u8; 32]> {
+    MID_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        let mut file = std::fs::File::open(path)?;
+        let mut total = 0;
+        while total < MID_HASH_SIZE {
+            let n = file.read(&mut buf[total..])?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        Ok(*blake3::hash(&buf[..total]).as_bytes())
+    })
+}
+
+/// Returns `true` if the file is large enough for the mid-hash stage to help.
+pub fn should_mid_hash(file_size: u64) -> bool {
+    file_size >= MID_HASH_MIN_FILE_SIZE
 }
 
 /// Compute a full BLAKE3 hash of a file using streaming 64KB chunks.
 ///
 /// For files > 512MB, delegates to [`full_hash_mmap`] for better performance.
+/// Uses a thread-local buffer to avoid per-call allocation.
 #[tracing::instrument(skip_all, fields(path = %path.display()))]
 pub fn full_hash(path: &Path) -> DeduplicateResult<[u8; 32]> {
     let metadata = std::fs::metadata(path)?;
@@ -41,19 +89,21 @@ pub fn full_hash(path: &Path) -> DeduplicateResult<[u8; 32]> {
         return full_hash_mmap(path);
     }
 
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; CHUNK_SIZE];
+    CHUNK_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = blake3::Hasher::new();
 
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
         }
-        hasher.update(&buf[..n]);
-    }
 
-    Ok(*hasher.finalize().as_bytes())
+        Ok(*hasher.finalize().as_bytes())
+    })
 }
 
 /// Compute a full BLAKE3 hash using memory-mapped I/O.
@@ -167,5 +217,47 @@ mod tests {
         let streaming = full_hash(f.path()).unwrap();
         let mmap = full_hash_mmap(f.path()).unwrap();
         assert_eq!(streaming, mmap);
+    }
+
+    #[test]
+    fn mid_hash_deterministic() {
+        let f = write_temp(b"mid hash content");
+        let h1 = mid_hash(f.path()).unwrap();
+        let h2 = mid_hash(f.path()).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn mid_hash_identical_files() {
+        let f1 = write_temp(b"same mid hash content");
+        let f2 = write_temp(b"same mid hash content");
+        assert_eq!(mid_hash(f1.path()).unwrap(), mid_hash(f2.path()).unwrap());
+    }
+
+    #[test]
+    fn mid_hash_different_files() {
+        let f1 = write_temp(b"content A for mid");
+        let f2 = write_temp(b"content B for mid");
+        assert_ne!(mid_hash(f1.path()).unwrap(), mid_hash(f2.path()).unwrap());
+    }
+
+    #[test]
+    fn should_mid_hash_threshold() {
+        // Files < 2MB should skip mid-hash
+        assert!(!should_mid_hash(1024));
+        assert!(!should_mid_hash(1024 * 1024)); // 1MB
+                                                // Files >= 2MB benefit from mid-hash
+        assert!(should_mid_hash(2 * 1024 * 1024));
+        assert!(should_mid_hash(10 * 1024 * 1024));
+    }
+
+    #[test]
+    fn small_file_mid_hash_matches_full_hash_of_same_data() {
+        // For files < 1MB, mid_hash reads everything — same as hashing that content
+        let content = vec![0xAB; 512]; // 512 bytes
+        let f = write_temp(&content);
+        let mh = mid_hash(f.path()).unwrap();
+        // mid_hash of small file should equal blake3 of the whole content
+        assert_eq!(mh, *blake3::hash(&content).as_bytes());
     }
 }

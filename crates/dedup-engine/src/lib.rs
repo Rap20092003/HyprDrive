@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 pub use error::{DeduplicateError, DeduplicateResult};
 pub use fuzzy::{find_similar_names, normalize_name, FuzzyMatch};
 pub use grouping::{group_matches, DupeGroup, MatchKind, UnionFind};
-pub use hasher::{full_hash, full_hash_mmap, partial_hash};
+pub use hasher::{full_hash, full_hash_mmap, mid_hash, partial_hash, should_mid_hash};
 pub use perceptual::{is_image, PerceptualMatch};
 pub use scanner::{ContentMatch, DupeReport, DuplicateScanner, ScanStrategy};
 
