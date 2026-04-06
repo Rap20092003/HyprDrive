@@ -21,20 +21,24 @@
 //! - `perceptual` (default): Enables perceptual image hashing via `image_hasher`.
 
 pub mod error;
+pub mod folder_dedup;
 pub mod fuzzy;
 pub mod grouping;
 pub mod hasher;
 pub mod perceptual;
+pub mod reflink;
 pub mod scanner;
 
 use std::path::{Path, PathBuf};
 
 // Re-export key types
 pub use error::{DeduplicateError, DeduplicateResult};
+pub use folder_dedup::{find_duplicate_folders, DupeFolderGroup, FolderDedupConfig};
 pub use fuzzy::{find_similar_names, normalize_name, FuzzyMatch};
 pub use grouping::{group_matches, DupeGroup, MatchKind, UnionFind};
 pub use hasher::{full_hash, full_hash_mmap, mid_hash, partial_hash, should_mid_hash};
 pub use perceptual::{is_image, PerceptualMatch};
+pub use reflink::{reflink_dedup, reflink_dedup_batch, supports_reflink, ReflinkResult};
 pub use scanner::{ContentMatch, DupeReport, DuplicateScanner, ScanStrategy};
 
 #[cfg(feature = "perceptual")]
