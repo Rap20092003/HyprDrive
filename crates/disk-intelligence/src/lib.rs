@@ -10,10 +10,10 @@
     unsafe_code
 )]
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn smoke() {
-        // Placeholder — ensures this crate appears in `cargo test` output.
-    }
-}
+pub mod bubble_up;
+pub mod patterns;
+pub mod treemap;
+
+pub use bubble_up::{compute_bubble_up, DirSizeDelta};
+pub use patterns::{build_artifact_sql_fragment, is_build_artifact_dir, BUILD_ARTIFACT_PATTERNS};
+pub use treemap::{squarify, Rect, TreemapItem, TreemapNode};

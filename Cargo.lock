@@ -866,6 +866,7 @@ dependencies = [
  "criterion",
  "image",
  "image_hasher",
+ "libc",
  "memmap2",
  "rayon",
  "serde",
@@ -879,6 +880,10 @@ dependencies = [
 [[package]]
 name = "hyprdrive-disk-intelligence"
 version = "0.1.0"
+dependencies = [
+ "criterion",
+ "serde",
+]
 
 [[package]]
 name = "hyprdrive-ffmpeg"

@@ -113,6 +113,39 @@ async fn run_full_scan(
         "disk intelligence summary"
     );
 
+    // Populate redb DIR_SIZE_CACHE from SQLite dir_sizes for fast lookups.
+    {
+        let dir_rows: Vec<hyprdrive_core::db::types::DirSizeRow> = sqlx::query_as(
+            "SELECT location_id, file_count, total_bytes, allocated_bytes, cumulative_allocated
+             FROM dir_sizes
+             WHERE location_id IN (SELECT id FROM locations WHERE volume_id = ?1)",
+        )
+        .bind(&volume_id_for_intel)
+        .fetch_all(pool)
+        .await
+        .context("fetch dir_sizes for cache")?;
+
+        let entries: Vec<(String, hyprdrive_core::db::cache::DirSizeRecord)> = dir_rows
+            .iter()
+            .map(|r| {
+                (
+                    r.location_id.clone(),
+                    hyprdrive_core::db::cache::DirSizeRecord {
+                        file_count: r.file_count as u64,
+                        total_bytes: r.total_bytes as u64,
+                        cumulative_allocated: r.cumulative_allocated as u64,
+                    },
+                )
+            })
+            .collect();
+
+        if !entries.is_empty() {
+            hyprdrive_core::db::cache::dir_size::populate_batch(cache, &entries)
+                .context("DIR_SIZE_CACHE population failed")?;
+            info!(entries = entries.len(), "DIR_SIZE_CACHE populated");
+        }
+    }
+
     info!(
         total = stats.total,
         hashed = stats.hashed,

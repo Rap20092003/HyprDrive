@@ -205,3 +205,50 @@ pub struct DuplicateGroupRow {
     /// Total wasted bytes: (count - 1) * size
     pub wasted_bytes: i64,
 }
+
+/// File type category breakdown for pie/bar chart visualization.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TypeBreakdownRow {
+    /// Category name (e.g., "Image", "Video", "Code", "Other")
+    pub category: String,
+    /// Hex color for UI (e.g., "#4CAF50")
+    pub color: String,
+    /// Number of files in this category
+    pub file_count: i64,
+    /// Total logical bytes in this category
+    pub total_bytes: i64,
+}
+
+/// A file that hasn't been modified in a long time.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct StaleFileRow {
+    /// LocationId
+    pub location_id: String,
+    /// Full path
+    pub path: String,
+    /// File name
+    pub name: String,
+    /// Extension
+    pub extension: Option<String>,
+    /// File size in bytes
+    pub size_bytes: i64,
+    /// Last modified timestamp
+    pub modified_at: String,
+    /// Days since last modification
+    pub days_stale: i64,
+}
+
+/// A build artifact directory with aggregated size.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct BuildArtifactRow {
+    /// Directory path
+    pub path: String,
+    /// Directory name (e.g., "node_modules")
+    pub name: String,
+    /// Total bytes consumed by this directory tree
+    pub total_bytes: i64,
+    /// Number of files within
+    pub file_count: i64,
+    /// Which pattern matched (e.g., "node_modules")
+    pub pattern: String,
+}
