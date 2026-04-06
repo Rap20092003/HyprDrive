@@ -43,29 +43,30 @@ fn full_scan_inner(volume: &Path, fs_kind: FilesystemKind) -> FsIndexerResult<Sc
     // Build parent map for path reconstruction
     let mut parent_map = mft::build_parent_map(&topo_entries);
 
-    // Dynamically detect the NTFS root FRN. usn-journal-rs returns full
-    // 64-bit file references (record number + sequence number in upper bits),
-    // so the root is NOT always 5 — it could be e.g. 0x0001000000000005.
-    // Strategy: find the most-referenced parent_fid that has no entry in
-    // parent_map (i.e. it was filtered out by MIN_USER_FRN).
+    // Ensure the NTFS root directory (record number 5) is in the parent map
+    // as a self-referencing entry. build_parent_map() now uses masked 48-bit
+    // record numbers, so the root should already be filtered out by
+    // MIN_USER_FRN. We still do dynamic detection as a safety net: find the
+    // most-referenced parent record number not present in the map.
     {
         let mut missing_parents: std::collections::HashMap<u64, usize> =
             std::collections::HashMap::new();
         for entry in &topo_entries {
-            if !parent_map.contains_key(&entry.parent_fid) {
-                *missing_parents.entry(entry.parent_fid).or_default() += 1;
+            let parent_rec = mft::record_number(entry.parent_fid);
+            if !parent_map.contains_key(&parent_rec) {
+                *missing_parents.entry(parent_rec).or_default() += 1;
             }
         }
-        if let Some((&root_fid, &count)) = missing_parents.iter().max_by_key(|(_, c)| *c) {
+        if let Some((&root_rec, &count)) = missing_parents.iter().max_by_key(|(_, c)| *c) {
             tracing::info!(
-                root_fid,
-                root_fid_hex = format!("0x{:016X}", root_fid),
+                root_record = root_rec,
+                root_hex = format!("0x{:012X}", root_rec),
                 references = count,
-                "detected NTFS root FRN dynamically"
+                "detected NTFS root record number dynamically"
             );
-            parent_map.insert(root_fid, (root_fid, OsString::new()));
+            parent_map.insert(root_rec, (root_rec, OsString::new()));
         } else {
-            tracing::warn!("no missing parent FRN detected — root may already be in map");
+            tracing::warn!("no missing parent record detected — root may already be in map");
         }
     }
 
