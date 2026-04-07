@@ -339,6 +339,26 @@ mod tests {
         assert!(names.is_empty());
     }
 
+    /// Diagnostic test: prints all discovered volumes with type and filesystem info.
+    /// Run: `cargo test -p hyprdrive-fs-indexer -- --ignored enumerate_volumes_diagnostic --nocapture`
+    #[test]
+    #[ignore]
+    fn enumerate_volumes_diagnostic() {
+        let volumes = enumerate_volumes();
+        println!("\n=== DISCOVERED VOLUMES ({}) ===", volumes.len());
+        for d in &volumes {
+            println!(
+                "  {:12} {:10?} fs={:?}  path={}",
+                d.volume_id,
+                d.drive_type,
+                d.fs_kind,
+                d.path.display()
+            );
+        }
+        println!();
+        assert!(!volumes.is_empty(), "should find at least one volume");
+    }
+
     #[test]
     fn wsl_output_parsing_with_bom() {
         // UTF-16LE with BOM (0xFFFE) then "Ubuntu\r\n"
