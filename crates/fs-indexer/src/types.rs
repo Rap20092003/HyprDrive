@@ -71,6 +71,20 @@ pub enum FsChange {
     },
 }
 
+/// A filesystem change tagged with its source volume.
+///
+/// The USN listener wraps raw [`FsChange`] events with the volume they came from,
+/// enabling the watcher loop to route events to the correct `ChangeProcessor`.
+#[derive(Debug, Clone)]
+pub struct VolumedChange {
+    /// Volume root path (e.g., `"C:\\"` or `"\\\\wsl.localhost\\Ubuntu\\"`).
+    pub volume: PathBuf,
+    /// Short volume ID for processor lookup (e.g., `"C"`, `"wsl:Ubuntu"`).
+    pub volume_id: String,
+    /// The underlying filesystem change event.
+    pub change: FsChange,
+}
+
 /// Detected filesystem type for a volume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FilesystemKind {

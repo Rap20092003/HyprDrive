@@ -18,12 +18,9 @@ mod cursor_store;
 mod watcher;
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
-
-/// Default scan root for Windows volumes.
-#[cfg(target_os = "windows")]
-const DEFAULT_SCAN_ROOT: &str = "C:\\";
 
 /// Default scan root for Linux — user's home directory.
 #[cfg(target_os = "linux")]
@@ -33,8 +30,9 @@ fn default_scan_root() -> std::path::PathBuf {
 
 /// Derive a volume ID from a scan root path.
 ///
-/// - Windows: "C" from "C:\\"
-/// - Linux/macOS: last path component (e.g. "home" from "/home")
+/// - Windows drive letters: `"C"` from `"C:\\"`
+/// - WSL UNC paths: `"wsl:Ubuntu"` from `"\\wsl.localhost\Ubuntu\"`
+/// - Linux/macOS: last path component (e.g. `"home"` from `"/home"`)
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn derive_volume_id(scan_root: &std::path::Path) -> String {
     let lossy = scan_root.to_string_lossy();
@@ -44,6 +42,17 @@ fn derive_volume_id(scan_root: &std::path::Path) -> String {
         if ch.is_ascii_alphabetic() {
             return ch.to_ascii_uppercase().to_string();
         }
+    }
+    // WSL UNC paths: "wsl:Ubuntu" from "\\wsl.localhost\Ubuntu\"
+    if lossy.starts_with("\\\\wsl.localhost\\") || lossy.starts_with("\\\\wsl$\\") {
+        let prefix = if lossy.starts_with("\\\\wsl.localhost\\") {
+            "\\\\wsl.localhost\\"
+        } else {
+            "\\\\wsl$\\"
+        };
+        let rest = &lossy[prefix.len()..];
+        let name = rest.split('\\').next().unwrap_or("unknown");
+        return format!("wsl:{}", name);
     }
     // Linux/macOS: use last path component or full path.
     scan_root
@@ -211,80 +220,139 @@ async fn main() -> Result<()> {
     // Track watcher task and listener for shutdown.
     let mut _watcher_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    // ── Phase 3: Volume scanning + Phase 8: Real-time watcher ──
-    // Windows: NTFS MFT scan → USN journal listener
+    // ── Phase 3: Multi-volume scanning + Phase 8: Real-time watcher ──
+    // Windows: discover all volumes → parallel MFT/jwalk scan → USN journal listener
     #[cfg(target_os = "windows")]
     let mut _usn_listener: Option<hyprdrive_fs_indexer::UsnListener> = None;
 
     #[cfg(target_os = "windows")]
     {
-        let scan_root = std::path::Path::new(DEFAULT_SCAN_ROOT);
-        match run_full_scan(scan_root, &pool, &cache).await {
-            Ok(result) => {
-                let volume_id = derive_volume_id(scan_root);
+        // ── Step 1: Discover all volumes ──
+        let volumes = hyprdrive_fs_indexer::enumerate_volumes();
+        info!(
+            count = volumes.len(),
+            "discovered volumes: {}",
+            volumes
+                .iter()
+                .map(|d| format!("{}({:?})", d.volume_id, d.drive_type))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
-                // ── Phase 8: Real-time watcher ──
-                if result.cursor.is_some() {
-                    // 1. Create cursor store and pre-seed with scan cursor.
-                    let cursor_store = Arc::new(cursor_store::SqliteCursorStore::new(pool.clone()));
-                    if let Some(ref c) = result.cursor {
-                        let store = Arc::clone(&cursor_store);
-                        let vol = volume_id.clone();
-                        let cursor_json =
-                            serde_json::to_string(c).expect("UsnCursor serialization cannot fail");
-                        if let Err(e) = tokio::task::spawn_blocking(move || {
-                            use hyprdrive_fs_indexer::CursorStore;
-                            store.save(&vol, &cursor_json)
-                        })
-                        .await?
-                        {
-                            tracing::warn!(error = %e, "failed to pre-seed cursor");
+        if volumes.is_empty() {
+            tracing::warn!("no scannable volumes found");
+        }
+
+        // ── Step 2: Scan all volumes in parallel ──
+        let mut scan_set = tokio::task::JoinSet::new();
+        for drive in &volumes {
+            let path = drive.path.clone();
+            let pool = pool.clone();
+            let cache = Arc::clone(&cache);
+            scan_set.spawn(async move {
+                let volume_id = derive_volume_id(&path);
+                match run_full_scan(&path, &pool, &cache).await {
+                    Ok(result) => Some((path, volume_id, result)),
+                    Err(e) => {
+                        tracing::warn!(
+                            volume = %path.display(),
+                            error = %e,
+                            "scan failed for volume — skipping"
+                        );
+                        for cause in e.chain().skip(1) {
+                            tracing::warn!(cause = %cause, "  caused by");
                         }
+                        None
                     }
+                }
+            });
+        }
 
-                    // 2. Create change processor and seed fid map from initial scan.
-                    let processor = Arc::new(hyprdrive_object_pipeline::ChangeProcessor::new(
-                        volume_id.clone(),
-                        pool.clone(),
-                        Arc::clone(&cache),
-                    ));
-                    processor.seed_fid_map(&result.entries);
+        // Collect results from all parallel scans.
+        let mut scan_results: Vec<(std::path::PathBuf, String, hyprdrive_fs_indexer::ScanResult)> =
+            Vec::new();
+        while let Some(result) = scan_set.join_next().await {
+            match result {
+                Ok(Some(tuple)) => scan_results.push(tuple),
+                Ok(None) => {} // scan failed, already logged
+                Err(e) => tracing::error!(error = %e, "scan task panicked"),
+            }
+        }
+
+        info!(
+            successful = scan_results.len(),
+            total = volumes.len(),
+            "volume scans complete"
+        );
+
+        // ── Step 3: Build per-volume ChangeProcessors ──
+        let cursor_store = Arc::new(cursor_store::SqliteCursorStore::new(pool.clone()));
+        let mut processors: HashMap<String, Arc<hyprdrive_object_pipeline::ChangeProcessor>> =
+            HashMap::new();
+        let mut ntfs_volumes: Vec<std::path::PathBuf> = Vec::new();
+
+        for (path, volume_id, result) in &scan_results {
+            // Pre-seed USN cursor if available (NTFS volumes only).
+            if let Some(ref c) = result.cursor {
+                let store = Arc::clone(&cursor_store);
+                let vol = volume_id.clone();
+                let cursor_json =
+                    serde_json::to_string(c).expect("UsnCursor serialization cannot fail");
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    use hyprdrive_fs_indexer::CursorStore;
+                    store.save(&vol, &cursor_json)
+                })
+                .await?
+                {
+                    tracing::warn!(volume = %volume_id, error = %e, "failed to pre-seed cursor");
+                }
+                ntfs_volumes.push(path.clone());
+            }
+
+            // Create processor and seed fid_map.
+            let processor = Arc::new(hyprdrive_object_pipeline::ChangeProcessor::new(
+                volume_id.clone(),
+                pool.clone(),
+                Arc::clone(&cache),
+            ));
+            processor.seed_fid_map(&result.entries);
+            info!(
+                volume = %volume_id,
+                fid_map_entries = result.entries.len(),
+                "change processor seeded"
+            );
+            processors.insert(volume_id.clone(), processor);
+        }
+
+        // ── Step 4: Start USN listener for NTFS volumes ──
+        if !ntfs_volumes.is_empty() {
+            let mut listener_config = hyprdrive_fs_indexer::ListenerConfig::default();
+            for vol in &ntfs_volumes {
+                listener_config = listener_config.add_volume(vol.clone());
+            }
+            // Scale channel capacity with volume count.
+            listener_config = listener_config.with_capacity(10_000 * ntfs_volumes.len());
+
+            let (usn_listener, rx) = hyprdrive_fs_indexer::UsnListener::new(listener_config);
+            match usn_listener.start(cursor_store) {
+                Ok(_handles) => {
                     info!(
-                        fid_map_entries = result.entries.len(),
-                        "change processor fid map seeded"
+                        volumes = ntfs_volumes.len(),
+                        "real-time watcher started (USN journal)"
                     );
 
-                    // 3. Start USN listener.
-                    let listener_config = hyprdrive_fs_indexer::ListenerConfig {
-                        volumes: vec![scan_root.to_path_buf()],
-                        ..Default::default()
-                    };
-                    let (usn_listener, rx) =
-                        hyprdrive_fs_indexer::UsnListener::new(listener_config);
-                    match usn_listener.start(cursor_store) {
-                        Ok(_handles) => {
-                            info!("real-time watcher started (USN journal)");
-
-                            // 4. Spawn watcher loop.
-                            let mut wloop =
-                                watcher::WatcherLoop::new(rx, processor, rescan_tx.clone());
-                            _watcher_task = Some(tokio::spawn(async move { wloop.run().await }));
-                            _usn_listener = Some(usn_listener);
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to start USN listener — real-time watching disabled");
-                        }
-                    }
-                } else {
-                    info!("no USN cursor available — real-time watching disabled (fallback scan was used)");
+                    // ── Step 5: Spawn watcher loop with all processors ──
+                    let mut wloop =
+                        watcher::WatcherLoop::new_multi(rx, processors, rescan_tx.clone());
+                    _watcher_task = Some(tokio::spawn(async move { wloop.run().await }));
+                    _usn_listener = Some(usn_listener);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start USN listener");
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "volume scan failed — will retry on next cycle");
-                for cause in e.chain().skip(1) {
-                    tracing::warn!(cause = %cause, "  caused by");
-                }
-            }
+        } else {
+            info!("no NTFS volumes found — real-time watching disabled");
         }
     }
 
@@ -333,15 +401,14 @@ async fn main() -> Result<()> {
                     root: scan_root.clone(),
                     ..Default::default()
                 };
-                let (linux_listener, rx) =
+                let (linux_listener, _rx) =
                     hyprdrive_fs_indexer::LinuxListener::new(listener_config);
                 match linux_listener.start() {
                     Ok(_handle) => {
                         info!("real-time watcher started (inotify)");
-
-                        // Spawn watcher loop.
-                        let mut wloop = watcher::WatcherLoop::new(rx, processor, rescan_tx.clone());
-                        _watcher_task = Some(tokio::spawn(async move { wloop.run().await }));
+                        // NOTE: Linux watcher loop needs VolumedChange migration too.
+                        // For now, linux real-time watching is disabled until
+                        // LinuxListener emits VolumedChange.
                         _linux_listener = Some(linux_listener);
                     }
                     Err(e) => {
@@ -366,12 +433,9 @@ async fn main() -> Result<()> {
     };
     let mut bg_hasher_task: Option<tokio::task::JoinHandle<()>> = if pending > 0 {
         info!(pending, "spawning background hasher");
-        #[cfg(target_os = "windows")]
-        let volume_id = derive_volume_id(std::path::Path::new(DEFAULT_SCAN_ROOT));
-        #[cfg(target_os = "linux")]
-        let volume_id = derive_volume_id(&default_scan_root());
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let volume_id = "unknown".to_string();
+        // Use "multi" as volume_id since deferred objects span multiple volumes.
+        // The hasher derives per-row volume_id from the DB query.
+        let volume_id = "multi".to_string();
 
         let bg_config = hyprdrive_object_pipeline::BackgroundHasherConfig::new(volume_id);
         let bg_pool = pool.clone();
@@ -426,7 +490,8 @@ async fn main() -> Result<()> {
                             // Determine scan root for rescan.
                             #[cfg(target_os = "windows")]
                             let scan_root = if volume.as_os_str().is_empty() {
-                                std::path::PathBuf::from(DEFAULT_SCAN_ROOT)
+                                // Default: rescan C: as fallback. Full multi-rescan is future work.
+                                std::path::PathBuf::from("C:\\")
                             } else {
                                 volume
                             };
@@ -515,5 +580,21 @@ mod tests {
     #[test]
     fn derive_volume_id_root() {
         assert_eq!(derive_volume_id(Path::new("/")), "root");
+    }
+
+    #[test]
+    fn derive_volume_id_wsl_localhost() {
+        assert_eq!(
+            derive_volume_id(Path::new("\\\\wsl.localhost\\Ubuntu\\")),
+            "wsl:Ubuntu"
+        );
+    }
+
+    #[test]
+    fn derive_volume_id_wsl_dollar() {
+        assert_eq!(
+            derive_volume_id(Path::new("\\\\wsl$\\Debian\\")),
+            "wsl:Debian"
+        );
     }
 }

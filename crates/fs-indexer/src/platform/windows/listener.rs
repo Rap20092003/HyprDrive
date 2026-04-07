@@ -8,7 +8,7 @@
 //! listener does not depend on a specific storage backend.
 
 use crate::error::FsIndexerResult;
-use crate::types::{CursorStore, FsChange, UsnCursor};
+use crate::types::{CursorStore, FsChange, UsnCursor, VolumedChange};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,7 +67,7 @@ impl ListenerConfig {
 /// persisted via a [`CursorStore`] for crash recovery.
 pub struct UsnListener {
     config: ListenerConfig,
-    tx: mpsc::Sender<FsChange>,
+    tx: mpsc::Sender<VolumedChange>,
     cancel: CancellationToken,
 }
 
@@ -75,7 +75,7 @@ impl UsnListener {
     /// Create a new listener with the given configuration.
     ///
     /// Returns the listener and a receiver for filesystem change events.
-    pub fn new(config: ListenerConfig) -> (Self, mpsc::Receiver<FsChange>) {
+    pub fn new(config: ListenerConfig) -> (Self, mpsc::Receiver<VolumedChange>) {
         let (tx, rx) = mpsc::channel(config.channel_capacity);
         let listener = Self {
             config,
@@ -162,12 +162,13 @@ fn volume_key(volume: &std::path::Path) -> String {
 /// Main poll loop for a single volume. Runs in a blocking thread.
 fn poll_loop<S: CursorStore>(
     volume: PathBuf,
-    tx: mpsc::Sender<FsChange>,
+    tx: mpsc::Sender<VolumedChange>,
     cancel: CancellationToken,
     store: Arc<S>,
     interval: Duration,
 ) {
     let vkey = volume_key(&volume);
+    let vol_id = vkey.clone();
     let _span = tracing::info_span!("usn_listener", volume = %vkey).entered();
 
     // Load cursor from store, or read a fresh one
@@ -229,22 +230,33 @@ fn poll_loop<S: CursorStore>(
                             cursor.journal_id, new_cursor.journal_id
                         ),
                     };
-                    if tx.blocking_send(rescan).is_err() {
+                    let wrapped = VolumedChange {
+                        volume: volume.clone(),
+                        volume_id: vol_id.clone(),
+                        change: rescan,
+                    };
+                    if tx.blocking_send(wrapped).is_err() {
                         tracing::warn!("Channel closed, listener exiting");
                         return;
                     }
                 }
 
-                // Send changes
-                for change in &changes {
-                    if tx.blocking_send(change.clone()).is_err() {
+                // Send changes wrapped with volume context
+                let change_count = changes.len();
+                for change in changes {
+                    let wrapped = VolumedChange {
+                        volume: volume.clone(),
+                        volume_id: vol_id.clone(),
+                        change,
+                    };
+                    if tx.blocking_send(wrapped).is_err() {
                         tracing::warn!("Channel closed, listener exiting");
                         return;
                     }
                 }
 
-                if !changes.is_empty() {
-                    tracing::debug!(count = changes.len(), "Sent change events");
+                if change_count > 0 {
+                    tracing::debug!(count = change_count, "Sent change events");
                 }
 
                 cursor = new_cursor;
@@ -265,7 +277,12 @@ fn poll_loop<S: CursorStore>(
                         volume: volume.clone(),
                         reason: format!("USN poll error: {e}"),
                     };
-                    if tx.blocking_send(rescan).is_err() {
+                    let wrapped = VolumedChange {
+                        volume: volume.clone(),
+                        volume_id: vol_id.clone(),
+                        change: rescan,
+                    };
+                    if tx.blocking_send(wrapped).is_err() {
                         tracing::warn!("Channel closed, listener exiting");
                         return;
                     }

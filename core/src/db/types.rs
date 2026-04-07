@@ -191,6 +191,8 @@ pub struct DeferredObjectRow {
     pub fid: Option<i64>,
     /// Modified timestamp for inode cache key
     pub modified_at: String,
+    /// Volume ID for inode cache key scoping (e.g. "C", "D", "wsl:Ubuntu")
+    pub volume_id: String,
 }
 
 /// A group of duplicate files sharing the same content hash.

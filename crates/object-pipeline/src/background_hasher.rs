@@ -157,12 +157,8 @@ pub async fn run_background_hasher(
                             ) {
                                 Ok(dt) => {
                                     let mtime = dt.and_utc().timestamp();
-                                    let cache_key = inode::cache_key_v2(
-                                        &config.volume_id,
-                                        fid_u64,
-                                        mtime,
-                                        size,
-                                    );
+                                    let cache_key =
+                                        inode::cache_key_v2(&row.volume_id, fid_u64, mtime, size);
                                     if let Err(e) = inode::insert(&cache, &cache_key, &new_id_hex) {
                                         tracing::warn!(error = %e, "inode cache insert failed");
                                     }

@@ -948,7 +948,7 @@ pub async fn fetch_deferred_batch(
     // H4: GROUP BY o.id to avoid returning duplicate rows when one deferred
     // object has multiple locations, preventing wasted re-hashing.
     sqlx::query_as(
-        "SELECT o.id AS object_id, MIN(l.path) AS path, l.size_bytes, l.fid, l.modified_at
+        "SELECT o.id AS object_id, MIN(l.path) AS path, l.size_bytes, l.fid, l.modified_at, l.volume_id
          FROM objects o
          JOIN locations l ON l.object_id = o.id
          WHERE o.hash_state = 'deferred' AND l.is_directory = 0
