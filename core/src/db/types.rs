@@ -240,6 +240,19 @@ pub struct StaleFileRow {
     pub days_stale: i64,
 }
 
+/// A tag record from the `tags` table.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TagRow {
+    /// Tag UUID
+    pub id: String,
+    /// Human-readable tag name
+    pub name: String,
+    /// Hex color string for UI rendering (e.g. `"#4CAF50"`)
+    pub color: Option<String>,
+    /// Parent tag ID for hierarchical tags
+    pub parent_id: Option<String>,
+}
+
 /// A build artifact directory with aggregated size.
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct BuildArtifactRow {

@@ -87,6 +87,13 @@ rmp-serde = "1"
 # Testing utilities
 tempfile = "3"
 
+# Phase 9: CQRS Operations Layer
+inventory = "0.3"
+trash = "5"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+kamadak-exif = "0.5"
+
 [profile.dev]
 opt-level = 0
 debug = true

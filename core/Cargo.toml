@@ -22,6 +22,9 @@ sqlx = { workspace = true }
 redb = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
+inventory = { workspace = true }
+trash = { workspace = true }
+kamadak-exif = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -14,6 +14,7 @@
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod cursor_store;
+mod router;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod watcher;
 
@@ -220,6 +221,9 @@ async fn main() -> Result<()> {
     // Track watcher task and listener for shutdown.
     let mut _watcher_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Default volume for HTTP API (set during scan, used for OperationsContext).
+    let mut default_volume_id = String::from("C");
+
     // ── Phase 3: Multi-volume scanning + Phase 8: Real-time watcher ──
     // Windows: discover all volumes → parallel MFT/jwalk scan → USN journal listener
     #[cfg(target_os = "windows")]
@@ -284,6 +288,11 @@ async fn main() -> Result<()> {
             total = volumes.len(),
             "volume scans complete"
         );
+
+        // Set default volume for HTTP API from first successfully scanned volume.
+        if let Some((_, vid, _)) = scan_results.first() {
+            default_volume_id = vid.clone();
+        }
 
         // ── Step 3: Build per-volume ChangeProcessors ──
         let cursor_store = Arc::new(cursor_store::SqliteCursorStore::new(pool.clone()));
@@ -366,6 +375,7 @@ async fn main() -> Result<()> {
         match run_full_scan(&scan_root, &pool, &cache).await {
             Ok(result) => {
                 let volume_id = derive_volume_id(&scan_root);
+                default_volume_id = volume_id.clone();
 
                 // Pre-seed linux cursor if available.
                 if let Some(ref c) = result.linux_cursor {
@@ -456,9 +466,48 @@ async fn main() -> Result<()> {
         None
     };
 
-    // FIXME(phase-9): start EventBus (tokio::broadcast channel for domain events)
     // FIXME(phase-13): start Iroh P2P node for device sync
-    // FIXME(phase-13): start Axum HTTP server on :7421 for UI/CLI clients
+
+    // ── Phase 9: start Axum HTTP server on :7421 ──
+    let ops_ctx = {
+        use hyprdrive_core::domain::id::DeviceId;
+        use hyprdrive_core::ops::{IndexContext, OperationsContext, SessionContext, StorageContext};
+        use hyprdrive_core::domain::undo::UndoStack;
+        use tokio::sync::Mutex;
+
+        Arc::new(OperationsContext {
+            session: SessionContext {
+                device_id: DeviceId::new(),
+                permissions: vec!["read".into(), "write".into(), "delete".into()],
+                source: "daemon".into(),
+                correlation_id: None,
+            },
+            storage: StorageContext {
+                volume_id: default_volume_id.clone(),
+            },
+            index: IndexContext {
+                pool: pool.clone(),
+                cache: Arc::clone(&cache),
+            },
+            undo_stack: Arc::new(Mutex::new(UndoStack::new())),
+        })
+    };
+    let http_router = {
+        use tower_http::cors::{Any, CorsLayer};
+        let cors = CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any);
+        router::build_router(ops_ctx).layer(cors)
+    };
+    let http_listener = tokio::net::TcpListener::bind("0.0.0.0:7421").await
+        .context("failed to bind HTTP server on :7421")?;
+    info!("HTTP API listening on http://0.0.0.0:7421");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(http_listener, http_router).await {
+            tracing::error!(error = %e, "HTTP server error");
+        }
+    });
 
     // ── Event loop: handle rescans and shutdown ──
     info!("Daemon ready. Press Ctrl+C to stop.");
