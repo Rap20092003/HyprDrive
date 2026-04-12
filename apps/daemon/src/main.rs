@@ -12,10 +12,10 @@
     missing_docs
 )]
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod cursor_store;
 mod router;
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod watcher;
 
 use anyhow::{Context, Result};
