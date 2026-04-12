@@ -191,6 +191,8 @@ pub struct DeferredObjectRow {
     pub fid: Option<i64>,
     /// Modified timestamp for inode cache key
     pub modified_at: String,
+    /// Volume ID for inode cache key scoping (e.g. "C", "D", "wsl:Ubuntu")
+    pub volume_id: String,
 }
 
 /// A group of duplicate files sharing the same content hash.
@@ -236,6 +238,19 @@ pub struct StaleFileRow {
     pub modified_at: String,
     /// Days since last modification
     pub days_stale: i64,
+}
+
+/// A tag record from the `tags` table.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct TagRow {
+    /// Tag UUID
+    pub id: String,
+    /// Human-readable tag name
+    pub name: String,
+    /// Hex color string for UI rendering (e.g. `"#4CAF50"`)
+    pub color: Option<String>,
+    /// Parent tag ID for hierarchical tags
+    pub parent_id: Option<String>,
 }
 
 /// A build artifact directory with aggregated size.

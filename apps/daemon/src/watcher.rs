@@ -4,7 +4,7 @@
 //! This module collects events over a debounce window, deduplicates them via
 //! `coalesce_changes`, then dispatches the batch to the ChangeProcessor.
 
-use hyprdrive_fs_indexer::FsChange;
+use hyprdrive_fs_indexer::{FsChange, VolumedChange};
 use hyprdrive_object_pipeline::ChangeProcessor;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,31 +20,51 @@ const DEFAULT_MAX_BATCH: usize = 5000;
 
 /// Event loop that collects, coalesces, and dispatches FsChange batches.
 pub struct WatcherLoop {
-    rx: mpsc::Receiver<FsChange>,
-    processor: Arc<ChangeProcessor>,
+    rx: mpsc::Receiver<VolumedChange>,
+    processors: HashMap<String, Arc<ChangeProcessor>>,
     debounce: Duration,
     max_batch: usize,
     rescan_tx: mpsc::Sender<PathBuf>,
 }
 
 impl WatcherLoop {
+    /// Create a watcher with a single processor (backward compat).
+    #[allow(dead_code)]
     pub fn new(
-        rx: mpsc::Receiver<FsChange>,
+        rx: mpsc::Receiver<VolumedChange>,
         processor: Arc<ChangeProcessor>,
+        volume_id: String,
         rescan_tx: mpsc::Sender<PathBuf>,
     ) -> Self {
+        let mut processors = HashMap::new();
+        processors.insert(volume_id, processor);
         Self {
             rx,
-            processor,
+            processors,
             debounce: Duration::from_millis(DEFAULT_DEBOUNCE_MS),
             max_batch: DEFAULT_MAX_BATCH,
             rescan_tx,
         }
     }
 
-    /// Main loop: collect → coalesce → dispatch → repeat.
+    /// Create a watcher with multiple processors (one per volume).
+    pub fn new_multi(
+        rx: mpsc::Receiver<VolumedChange>,
+        processors: HashMap<String, Arc<ChangeProcessor>>,
+        rescan_tx: mpsc::Sender<PathBuf>,
+    ) -> Self {
+        Self {
+            rx,
+            processors,
+            debounce: Duration::from_millis(DEFAULT_DEBOUNCE_MS),
+            max_batch: DEFAULT_MAX_BATCH,
+            rescan_tx,
+        }
+    }
+
+    /// Main loop: collect → partition by volume → coalesce → dispatch → repeat.
     pub async fn run(&mut self) {
-        let mut batch: Vec<FsChange> = Vec::new();
+        let mut batch: Vec<VolumedChange> = Vec::new();
 
         loop {
             // Wait for first event or channel close.
@@ -68,28 +88,50 @@ impl WatcherLoop {
                 }
             }
 
-            let coalesced = coalesce_changes(std::mem::take(&mut batch));
-            if coalesced.is_empty() {
-                continue;
+            // Partition by volume_id.
+            let mut by_volume: HashMap<String, Vec<FsChange>> = HashMap::new();
+            for vc in std::mem::take(&mut batch) {
+                by_volume.entry(vc.volume_id).or_default().push(vc.change);
             }
 
-            match self.processor.process_changes(coalesced).await {
-                Ok(stats) => {
-                    tracing::info!(
-                        created = stats.created,
-                        deleted = stats.deleted,
-                        moved = stats.moved,
-                        modified = stats.modified,
-                        errors = stats.errors,
-                        "watcher batch processed"
-                    );
-                    if stats.rescan_needed {
-                        // Signal daemon to re-scan — best effort.
-                        let _ = self.rescan_tx.try_send(PathBuf::new());
-                    }
+            // Coalesce and dispatch per volume.
+            for (vol_id, changes) in by_volume {
+                let coalesced = coalesce_changes(changes);
+                if coalesced.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    tracing::error!(error = %e, "watcher batch failed");
+
+                let processor = match self.processors.get(&vol_id) {
+                    Some(p) => Arc::clone(p),
+                    None => {
+                        tracing::warn!(
+                            volume = %vol_id,
+                            dropped = coalesced.len(),
+                            "no processor for volume — dropping events"
+                        );
+                        continue;
+                    }
+                };
+
+                match processor.process_changes(coalesced).await {
+                    Ok(stats) => {
+                        tracing::info!(
+                            volume = %vol_id,
+                            created = stats.created,
+                            deleted = stats.deleted,
+                            moved = stats.moved,
+                            modified = stats.modified,
+                            errors = stats.errors,
+                            "watcher batch processed"
+                        );
+                        if stats.rescan_needed {
+                            // Signal daemon to re-scan — best effort.
+                            let _ = self.rescan_tx.try_send(PathBuf::new());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(volume = %vol_id, error = %e, "watcher batch failed");
+                    }
                 }
             }
         }

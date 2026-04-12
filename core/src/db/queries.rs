@@ -948,7 +948,7 @@ pub async fn fetch_deferred_batch(
     // H4: GROUP BY o.id to avoid returning duplicate rows when one deferred
     // object has multiple locations, preventing wasted re-hashing.
     sqlx::query_as(
-        "SELECT o.id AS object_id, MIN(l.path) AS path, l.size_bytes, l.fid, l.modified_at
+        "SELECT o.id AS object_id, MIN(l.path) AS path, l.size_bytes, l.fid, l.modified_at, l.volume_id
          FROM objects o
          JOIN locations l ON l.object_id = o.id
          WHERE o.hash_state = 'deferred' AND l.is_directory = 0
@@ -1014,6 +1014,93 @@ pub async fn upgrade_deferred_object(
 
     tx.commit().await?;
     Ok(result.rows_affected() > 0)
+}
+
+// ── Phase 9: CQRS Operations Layer additions ─────────────────────────────────
+
+/// Look up a single location by volume and absolute path.
+///
+/// Returns `None` if no location with that path exists on the given volume.
+pub async fn lookup_location_by_path(
+    pool: &sqlx::SqlitePool,
+    volume_id: &str,
+    path: &str,
+) -> Result<Option<crate::db::types::LocationRow>, sqlx::Error> {
+    sqlx::query_as::<_, crate::db::types::LocationRow>(
+        "SELECT id, object_id, volume_id, path, name, extension, parent_id,
+                is_directory, size_bytes, allocated_bytes, created_at, modified_at,
+                accessed_at, fid
+         FROM   locations
+         WHERE  volume_id = ?1 AND path = ?2",
+    )
+    .bind(volume_id)
+    .bind(path)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Add a tag to multiple objects in a single transaction.
+///
+/// Uses `INSERT OR IGNORE` so duplicate junction rows are silently skipped.
+/// Returns the number of rows actually inserted.
+pub async fn add_tags_batch(
+    pool: &sqlx::SqlitePool,
+    tag_id: &str,
+    object_ids: &[String],
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut inserted: u64 = 0;
+    for object_id in object_ids {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO tags_on_objects (tag_id, object_id) VALUES (?1, ?2)",
+        )
+        .bind(tag_id)
+        .bind(object_id)
+        .execute(&mut *tx)
+        .await?;
+        inserted += result.rows_affected();
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
+/// Remove a tag from multiple objects in a single transaction.
+///
+/// Returns the number of junction rows deleted.
+pub async fn remove_tags_batch(
+    pool: &sqlx::SqlitePool,
+    tag_id: &str,
+    object_ids: &[String],
+) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let mut deleted: u64 = 0;
+    for object_id in object_ids {
+        let result =
+            sqlx::query("DELETE FROM tags_on_objects WHERE tag_id = ?1 AND object_id = ?2")
+                .bind(tag_id)
+                .bind(object_id)
+                .execute(&mut *tx)
+                .await?;
+        deleted += result.rows_affected();
+    }
+    tx.commit().await?;
+    Ok(deleted)
+}
+
+/// Fetch all tags attached to a given object.
+pub async fn tags_for_object(
+    pool: &sqlx::SqlitePool,
+    object_id: &str,
+) -> Result<Vec<crate::db::types::TagRow>, sqlx::Error> {
+    sqlx::query_as::<_, crate::db::types::TagRow>(
+        "SELECT t.id, t.name, t.color, t.parent_id
+         FROM   tags t
+         JOIN   tags_on_objects tao ON tao.tag_id = t.id
+         WHERE  tao.object_id = ?1",
+    )
+    .bind(object_id)
+    .fetch_all(pool)
+    .await
 }
 
 #[cfg(test)]
@@ -2018,5 +2105,162 @@ mod tests {
         assert_eq!(row2.0, 8);
         assert_eq!(row2.1, 14336);
         assert_eq!(row2.2, 16384);
+    }
+
+    // ── Phase 9: CQRS query tests ─────────────────────────────────────────────
+
+    async fn p9_insert_object(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO objects (id, kind, size_bytes, hash_state, created_at, updated_at)
+             VALUES (?1, 'File', 1024, 'content', datetime('now'), datetime('now'))",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn p9_insert_location(
+        pool: &SqlitePool,
+        loc_id: &str,
+        obj_id: &str,
+        volume_id: &str,
+        path: &str,
+    ) {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        sqlx::query(
+            "INSERT INTO locations (id, object_id, volume_id, path, name, is_directory,
+                                    size_bytes, allocated_bytes, created_at, modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0, 1024, 4096, datetime('now'), datetime('now'))",
+        )
+        .bind(loc_id)
+        .bind(obj_id)
+        .bind(volume_id)
+        .bind(path)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_lookup_location_by_path() {
+        let (pool, _dir) = setup().await;
+
+        p9_insert_object(&pool, "objA").await;
+        p9_insert_location(&pool, "locA", "objA", "C", "C:\\Users\\test\\file.txt").await;
+
+        let found = lookup_location_by_path(&pool, "C", "C:\\Users\\test\\file.txt")
+            .await
+            .unwrap();
+        assert!(found.is_some(), "should find the location");
+        let loc = found.unwrap();
+        assert_eq!(loc.id, "locA");
+        assert_eq!(loc.object_id, "objA");
+        assert_eq!(loc.path, "C:\\Users\\test\\file.txt");
+    }
+
+    #[tokio::test]
+    async fn test_lookup_location_by_path_missing() {
+        let (pool, _dir) = setup().await;
+
+        let found = lookup_location_by_path(&pool, "C", "C:\\nonexistent\\file.txt")
+            .await
+            .unwrap();
+        assert!(found.is_none(), "should return None for nonexistent path");
+    }
+
+    #[tokio::test]
+    async fn test_add_tags_batch() {
+        let (pool, _dir) = setup().await;
+
+        p9_insert_object(&pool, "obj1").await;
+        p9_insert_object(&pool, "obj2").await;
+        p9_insert_object(&pool, "obj3").await;
+        sqlx::query("INSERT INTO tags (id, name) VALUES ('tag1', 'Important')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let count = add_tags_batch(
+            &pool,
+            "tag1",
+            &["obj1".to_string(), "obj2".to_string(), "obj3".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 3);
+
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT object_id FROM tags_on_objects WHERE tag_id = 'tag1' ORDER BY object_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+
+        // Idempotent: re-adding same tag should insert 0
+        let count2 = add_tags_batch(&pool, "tag1", &["obj1".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(count2, 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_tags_batch() {
+        let (pool, _dir) = setup().await;
+
+        p9_insert_object(&pool, "obj1").await;
+        p9_insert_object(&pool, "obj2").await;
+        sqlx::query("INSERT INTO tags (id, name) VALUES ('tag1', 'Important')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_tags_batch(&pool, "tag1", &["obj1".to_string(), "obj2".to_string()])
+            .await
+            .unwrap();
+
+        let removed = remove_tags_batch(&pool, "tag1", &["obj1".to_string(), "obj2".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT object_id FROM tags_on_objects WHERE tag_id = 'tag1'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(rows.is_empty(), "all tag associations should be removed");
+    }
+
+    #[tokio::test]
+    async fn test_tags_for_object() {
+        let (pool, _dir) = setup().await;
+
+        p9_insert_object(&pool, "obj1").await;
+        sqlx::query("INSERT INTO tags (id, name, color) VALUES ('tag1', 'Work', '#FF0000')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO tags (id, name, color) VALUES ('tag2', 'Personal', '#00FF00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        add_tags_batch(&pool, "tag1", &["obj1".to_string()])
+            .await
+            .unwrap();
+        add_tags_batch(&pool, "tag2", &["obj1".to_string()])
+            .await
+            .unwrap();
+
+        let tags = tags_for_object(&pool, "obj1").await.unwrap();
+        assert_eq!(tags.len(), 2);
+        let names: Vec<_> = tags.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Work"));
+        assert!(names.contains(&"Personal"));
     }
 }

@@ -32,7 +32,7 @@ pub use error::{FsIndexerError, FsIndexerResult};
 pub use priority::{classify_priority, sort_by_priority, ScanPriority};
 pub use types::{
     CursorStore, FilesystemKind, FsChange, IndexCursor, IndexEntry, LinuxCursor, NoCursorStore,
-    ScanResult, TopoEntry, UsnCursor,
+    ScanResult, TopoEntry, UsnCursor, VolumedChange,
 };
 
 // Re-export platform-specific scanner functions
@@ -40,7 +40,7 @@ pub use types::{
 pub use platform::windows::scanner::{auto_scan, fallback_scan, full_scan};
 
 #[cfg(target_os = "windows")]
-pub use platform::windows::detect::detect_filesystem;
+pub use platform::windows::detect::{detect_filesystem, enumerate_volumes, DriveInfo, DriveType};
 
 #[cfg(target_os = "windows")]
 pub use platform::windows::usn::{poll_changes, read_cursor};
