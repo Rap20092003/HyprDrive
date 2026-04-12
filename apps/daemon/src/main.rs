@@ -19,6 +19,7 @@ mod router;
 mod watcher;
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
@@ -222,6 +223,7 @@ async fn main() -> Result<()> {
     let mut _watcher_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Default volume for HTTP API (set during scan, used for OperationsContext).
+    #[allow(unused_mut)]
     let mut default_volume_id = String::from("C");
 
     // ── Phase 3: Multi-volume scanning + Phase 8: Real-time watcher ──
