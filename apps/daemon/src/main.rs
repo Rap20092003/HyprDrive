@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
     info!(path = %cache_path.display(), "redb hot-cache ready");
 
     // Channel for rescan requests from watcher.
-    #[cfg_attr(target_os = "macos", allow(unused_variables))]
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let (rescan_tx, mut rescan_rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(4);
 
     // Track watcher task and listener for shutdown.
