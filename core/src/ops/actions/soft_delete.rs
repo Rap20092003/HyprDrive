@@ -3,7 +3,7 @@
 use crate::db::queries::{delete_location_by_path, delete_orphan_objects};
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -37,50 +37,55 @@ impl crate::ops::CoreAction for SoftDelete {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            let volume_id = &ctx.storage.volume_id;
-            let mut deleted_count = 0usize;
-            let mut orphaned_object_ids: Vec<String> = Vec::new();
+        let volume_id = &ctx.storage.volume_id;
+        let mut deleted_count = 0usize;
+        let mut orphaned_object_ids: Vec<String> = Vec::new();
 
-            for path_str in &input.paths {
-                let path = Path::new(path_str);
+        for path_str in &input.paths {
+            let path = Path::new(path_str);
 
-                if !path.exists() {
-                    return Err(OpsError::NotFound { path: path_str.clone() });
-                }
-
-                // Move to OS trash
-                trash::delete(path).map_err(|e| OpsError::Trash(e.to_string()))?;
-
-                // Remove location from DB; collect object_id for orphan cleanup
-                if let Some(object_id) =
-                    delete_location_by_path(&ctx.index.pool, volume_id, path_str).await?
-                {
-                    orphaned_object_ids.push(object_id);
-                }
-
-                deleted_count += 1;
+            if !path.exists() {
+                return Err(OpsError::NotFound {
+                    path: path_str.clone(),
+                });
             }
 
-            // Clean up objects that no longer have any locations
-            let orphaned_objects =
-                delete_orphan_objects(&ctx.index.pool, &orphaned_object_ids).await? as usize;
+            // Move to OS trash
+            trash::delete(path).map_err(|e| OpsError::Trash(e.to_string()))?;
 
-            let inverse_action = serde_json::json!({
-                "action": "restore_from_trash",
-                "original_paths": input.paths,
-            })
-            .to_string();
+            // Remove location from DB; collect object_id for orphan cleanup
+            if let Some(object_id) =
+                delete_location_by_path(&ctx.index.pool, volume_id, path_str).await?
+            {
+                orphaned_object_ids.push(object_id);
+            }
 
-            let entry = UndoEntry {
-                description: format!(
-                    "Deleted {} item(s) to trash",
-                    deleted_count
-                ),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+            deleted_count += 1;
+        }
 
-            Ok((SoftDeleteOutput { deleted_count, orphaned_objects }, entry))
+        // Clean up objects that no longer have any locations
+        let orphaned_objects =
+            delete_orphan_objects(&ctx.index.pool, &orphaned_object_ids).await? as usize;
+
+        let inverse_action = serde_json::json!({
+            "action": "restore_from_trash",
+            "original_paths": input.paths,
+        })
+        .to_string();
+
+        let entry = UndoEntry {
+            description: format!("Deleted {} item(s) to trash", deleted_count),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
+
+        Ok((
+            SoftDeleteOutput {
+                deleted_count,
+                orphaned_objects,
+            },
+            entry,
+        ))
     }
 }
 
@@ -112,7 +117,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -168,7 +175,12 @@ mod tests {
 
         let action = SoftDelete;
         let (output, entry) = action
-            .execute(&ctx, SoftDeleteInput { paths: vec![file_str.clone()] })
+            .execute(
+                &ctx,
+                SoftDeleteInput {
+                    paths: vec![file_str.clone()],
+                },
+            )
             .await
             .expect("execute");
 

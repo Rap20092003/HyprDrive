@@ -3,7 +3,7 @@
 use crate::db::queries::lookup_location_by_path;
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -44,11 +44,8 @@ fn extract_date_from_exif_or_mtime(path: &Path) -> Result<(String, String, Strin
     // Try EXIF first
     if let Ok(file) = std::fs::File::open(path) {
         let mut bufreader = std::io::BufReader::new(file);
-        if let Ok(exif_data) =
-            exif::Reader::new().read_from_container(&mut bufreader)
-        {
-            if let Some(field) =
-                exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+        if let Ok(exif_data) = exif::Reader::new().read_from_container(&mut bufreader) {
+            if let Some(field) = exif_data.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
             {
                 // Format: "2024:01:15 14:30:00"
                 let raw = field.display_value().to_string();
@@ -67,11 +64,8 @@ fn extract_date_from_exif_or_mtime(path: &Path) -> Result<(String, String, Strin
     }
 
     // Fallback: use file mtime
-    let meta = std::fs::metadata(path)
-        .map_err(|e| format!("metadata error: {}", e))?;
-    let modified = meta
-        .modified()
-        .map_err(|e| format!("mtime error: {}", e))?;
+    let meta = std::fs::metadata(path).map_err(|e| format!("metadata error: {}", e))?;
+    let modified = meta.modified().map_err(|e| format!("mtime error: {}", e))?;
     let secs = modified
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("time before epoch: {}", e))?
@@ -109,104 +103,96 @@ impl crate::ops::CoreAction for SmartRename {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            // Validate template contains at least one recognised placeholder
-            let has_placeholder = input.template.contains("{year}")
-                || input.template.contains("{month}")
-                || input.template.contains("{day}")
-                || input.template.contains("{original}");
+        // Validate template contains at least one recognised placeholder
+        let has_placeholder = input.template.contains("{year}")
+            || input.template.contains("{month}")
+            || input.template.contains("{day}")
+            || input.template.contains("{original}");
 
-            if !has_placeholder {
-                return Err(OpsError::InvalidInput {
-                    reason: "template must contain at least one of: {year}, {month}, {day}, {original}".into(),
-                });
-            }
+        if !has_placeholder {
+            return Err(OpsError::InvalidInput {
+                reason: "template must contain at least one of: {year}, {month}, {day}, {original}"
+                    .into(),
+            });
+        }
 
-            let volume_id = &ctx.storage.volume_id;
-            let mut renamed: Vec<RenamedFile> = Vec::new();
-            let mut skipped: Vec<SkippedFile> = Vec::new();
-            let mut inverse_moves: Vec<serde_json::Value> = Vec::new();
+        let volume_id = &ctx.storage.volume_id;
+        let mut renamed: Vec<RenamedFile> = Vec::new();
+        let mut skipped: Vec<SkippedFile> = Vec::new();
+        let mut inverse_moves: Vec<serde_json::Value> = Vec::new();
 
-            for source_str in &input.source_paths {
-                let source = PathBuf::from(source_str);
+        for source_str in &input.source_paths {
+            let source = PathBuf::from(source_str);
 
-                // Extract date — errors go to skipped list
-                let date_result = {
-                    let source_clone = source.clone();
-                    tokio::task::spawn_blocking(move || {
-                        extract_date_from_exif_or_mtime(&source_clone)
-                    })
+            // Extract date — errors go to skipped list
+            let date_result = {
+                let source_clone = source.clone();
+                tokio::task::spawn_blocking(move || extract_date_from_exif_or_mtime(&source_clone))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r)
-                };
+            };
 
-                let (year, month, day) = match date_result {
-                    Ok(d) => d,
-                    Err(e) => {
-                        skipped.push(SkippedFile {
-                            path: source_str.clone(),
-                            reason: format!("date extraction failed: {}", e),
-                        });
-                        continue;
-                    }
-                };
-
-                // Original stem (filename without extension)
-                let original_stem = source
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-
-                let original_extension: Option<String> = source
-                    .extension()
-                    .map(|e| e.to_string_lossy().into_owned());
-
-                let new_stem = apply_template(
-                    &input.template,
-                    &year,
-                    &month,
-                    &day,
-                    &original_stem,
-                );
-
-                let new_filename = match &original_extension {
-                    Some(ext) => format!("{}.{}", new_stem, ext),
-                    None => new_stem.clone(),
-                };
-
-                let dest_parent = source
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(PathBuf::new);
-
-                let dest = dest_parent.join(&new_filename);
-                let dest_str = dest.to_string_lossy().into_owned();
-
-                // Create parent dirs if needed
-                if let Some(parent) = dest.parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                        skipped.push(SkippedFile {
-                            path: source_str.clone(),
-                            reason: format!("create_dir_all failed: {}", e),
-                        });
-                        continue;
-                    }
-                }
-
-                // Perform rename
-                if let Err(e) = tokio::fs::rename(&source, &dest).await {
+            let (year, month, day) = match date_result {
+                Ok(d) => d,
+                Err(e) => {
                     skipped.push(SkippedFile {
                         path: source_str.clone(),
-                        reason: format!("rename failed: {}", e),
+                        reason: format!("date extraction failed: {}", e),
                     });
                     continue;
                 }
+            };
 
-                // Update DB if location is tracked
-                if let Ok(Some(loc)) =
-                    lookup_location_by_path(&ctx.index.pool, volume_id, source_str).await
-                {
-                    let _ = sqlx::query(
+            // Original stem (filename without extension)
+            let original_stem = source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            let original_extension: Option<String> =
+                source.extension().map(|e| e.to_string_lossy().into_owned());
+
+            let new_stem = apply_template(&input.template, &year, &month, &day, &original_stem);
+
+            let new_filename = match &original_extension {
+                Some(ext) => format!("{}.{}", new_stem, ext),
+                None => new_stem.clone(),
+            };
+
+            let dest_parent = source
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(PathBuf::new);
+
+            let dest = dest_parent.join(&new_filename);
+            let dest_str = dest.to_string_lossy().into_owned();
+
+            // Create parent dirs if needed
+            if let Some(parent) = dest.parent() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    skipped.push(SkippedFile {
+                        path: source_str.clone(),
+                        reason: format!("create_dir_all failed: {}", e),
+                    });
+                    continue;
+                }
+            }
+
+            // Perform rename
+            if let Err(e) = tokio::fs::rename(&source, &dest).await {
+                skipped.push(SkippedFile {
+                    path: source_str.clone(),
+                    reason: format!("rename failed: {}", e),
+                });
+                continue;
+            }
+
+            // Update DB if location is tracked
+            if let Ok(Some(loc)) =
+                lookup_location_by_path(&ctx.index.pool, volume_id, source_str).await
+            {
+                let _ = sqlx::query(
                         "UPDATE locations SET path=?1, name=?2, modified_at=datetime('now') WHERE id=?3",
                     )
                     .bind(&dest_str)
@@ -214,36 +200,36 @@ impl crate::ops::CoreAction for SmartRename {
                     .bind(&loc.id)
                     .execute(&ctx.index.pool)
                     .await;
-                }
-
-                inverse_moves.push(serde_json::json!({
-                    "from": dest_str,
-                    "to": source_str,
-                }));
-
-                renamed.push(RenamedFile {
-                    original_path: source_str.clone(),
-                    new_path: dest_str,
-                });
             }
 
-            let inverse_action = serde_json::json!({
-                "action": "bulk_move",
-                "moves": inverse_moves,
-            })
-            .to_string();
+            inverse_moves.push(serde_json::json!({
+                "from": dest_str,
+                "to": source_str,
+            }));
 
-            let entry = UndoEntry {
-                description: format!(
-                    "SmartRename: {} renamed, {} skipped",
-                    renamed.len(),
-                    skipped.len()
-                ),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+            renamed.push(RenamedFile {
+                original_path: source_str.clone(),
+                new_path: dest_str,
+            });
+        }
 
-            Ok((SmartRenameOutput { renamed, skipped }, entry))
+        let inverse_action = serde_json::json!({
+            "action": "bulk_move",
+            "moves": inverse_moves,
+        })
+        .to_string();
+
+        let entry = UndoEntry {
+            description: format!(
+                "SmartRename: {} renamed, {} skipped",
+                renamed.len(),
+                skipped.len()
+            ),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
+
+        Ok((SmartRenameOutput { renamed, skipped }, entry))
     }
 }
 
@@ -273,7 +259,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -301,7 +289,12 @@ mod tests {
             .expect("execute");
 
         // Should have renamed (not skipped) — mtime fallback is available
-        assert_eq!(output.renamed.len(), 1, "expected 1 renamed, got: {:?}", output.skipped);
+        assert_eq!(
+            output.renamed.len(),
+            1,
+            "expected 1 renamed, got: {:?}",
+            output.skipped
+        );
         assert!(output.skipped.is_empty());
 
         // Old path gone, new path exists

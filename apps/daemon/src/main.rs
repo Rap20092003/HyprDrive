@@ -471,8 +471,10 @@ async fn main() -> Result<()> {
     // ── Phase 9: start Axum HTTP server on :7421 ──
     let ops_ctx = {
         use hyprdrive_core::domain::id::DeviceId;
-        use hyprdrive_core::ops::{IndexContext, OperationsContext, SessionContext, StorageContext};
         use hyprdrive_core::domain::undo::UndoStack;
+        use hyprdrive_core::ops::{
+            IndexContext, OperationsContext, SessionContext, StorageContext,
+        };
         use tokio::sync::Mutex;
 
         Arc::new(OperationsContext {
@@ -500,7 +502,8 @@ async fn main() -> Result<()> {
             .allow_headers(Any);
         router::build_router(ops_ctx).layer(cors)
     };
-    let http_listener = tokio::net::TcpListener::bind("0.0.0.0:7421").await
+    let http_listener = tokio::net::TcpListener::bind("0.0.0.0:7421")
+        .await
         .context("failed to bind HTTP server on :7421")?;
     info!("HTTP API listening on http://0.0.0.0:7421");
     tokio::spawn(async move {

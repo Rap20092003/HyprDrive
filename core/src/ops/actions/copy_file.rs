@@ -4,7 +4,7 @@ use crate::db::queries::{upsert_location, upsert_object};
 use crate::db::types::{hash_state, LocationRow, ObjectRow};
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -39,116 +39,121 @@ impl crate::ops::CoreAction for CopyFile {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            let source = Path::new(&input.source_path);
-            let dest = Path::new(&input.dest_path);
+        let source = Path::new(&input.source_path);
+        let dest = Path::new(&input.dest_path);
 
-            // Validate source exists and is a file
-            if !source.exists() {
-                return Err(OpsError::NotFound {
-                    path: input.source_path.clone(),
-                });
-            }
-            if !source.is_file() {
-                return Err(OpsError::InvalidInput {
-                    reason: "source_path must be a file".into(),
-                });
-            }
+        // Validate source exists and is a file
+        if !source.exists() {
+            return Err(OpsError::NotFound {
+                path: input.source_path.clone(),
+            });
+        }
+        if !source.is_file() {
+            return Err(OpsError::InvalidInput {
+                reason: "source_path must be a file".into(),
+            });
+        }
 
-            // Validate dest parent exists
-            let dest_parent = dest.parent().ok_or_else(|| OpsError::InvalidInput {
-                reason: "dest_path has no parent".into(),
-            })?;
-            if !dest_parent.exists() {
-                return Err(OpsError::NotFound {
-                    path: dest_parent.to_string_lossy().into_owned(),
-                });
-            }
+        // Validate dest parent exists
+        let dest_parent = dest.parent().ok_or_else(|| OpsError::InvalidInput {
+            reason: "dest_path has no parent".into(),
+        })?;
+        if !dest_parent.exists() {
+            return Err(OpsError::NotFound {
+                path: dest_parent.to_string_lossy().into_owned(),
+            });
+        }
 
-            // Validate dest does not already exist
-            if dest.exists() {
-                return Err(OpsError::AlreadyExists {
-                    path: input.dest_path.clone(),
-                });
-            }
+        // Validate dest does not already exist
+        if dest.exists() {
+            return Err(OpsError::AlreadyExists {
+                path: input.dest_path.clone(),
+            });
+        }
 
-            // Copy the file
-            let bytes_copied = tokio::fs::copy(source, dest).await.map_err(OpsError::Io)?;
+        // Copy the file
+        let bytes_copied = tokio::fs::copy(source, dest).await.map_err(OpsError::Io)?;
 
-            // Hash the destination file in a blocking task
-            let dest_owned = dest.to_path_buf();
-            let hash_hex = tokio::task::spawn_blocking(move || {
-                let mut hasher = blake3::Hasher::new();
-                let mut file = std::fs::File::open(&dest_owned)?;
-                std::io::copy(&mut file, &mut hasher)?;
-                Ok::<String, std::io::Error>(hasher.finalize().to_hex().to_string())
-            })
-            .await
-            .map_err(|e| OpsError::TaskPanicked(e.to_string()))??;
+        // Hash the destination file in a blocking task
+        let dest_owned = dest.to_path_buf();
+        let hash_hex = tokio::task::spawn_blocking(move || {
+            let mut hasher = blake3::Hasher::new();
+            let mut file = std::fs::File::open(&dest_owned)?;
+            std::io::copy(&mut file, &mut hasher)?;
+            Ok::<String, std::io::Error>(hasher.finalize().to_hex().to_string())
+        })
+        .await
+        .map_err(|e| OpsError::TaskPanicked(e.to_string()))??;
 
-            let volume_id = &ctx.storage.volume_id;
-            let dest_str = input.dest_path.as_str();
+        let volume_id = &ctx.storage.volume_id;
+        let dest_str = input.dest_path.as_str();
 
-            // Dest location_id from volume+path
-            let dest_location_id = {
-                let key = format!("{}:{}", volume_id, dest_str);
-                let hex = blake3::hash(key.as_bytes()).to_hex();
-                hex[..32].to_string()
-            };
+        // Dest location_id from volume+path
+        let dest_location_id = {
+            let key = format!("{}:{}", volume_id, dest_str);
+            let hex = blake3::hash(key.as_bytes()).to_hex();
+            hex[..32].to_string()
+        };
 
-            let dest_name = dest
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+        let dest_name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
-            let dest_extension: Option<String> = dest
-                .extension()
-                .map(|e| e.to_string_lossy().into_owned());
+        let dest_extension: Option<String> =
+            dest.extension().map(|e| e.to_string_lossy().into_owned());
 
-            // Use full 64-char hash as object id (content-addressed)
-            let object_id = hash_hex.clone();
+        // Use full 64-char hash as object id (content-addressed)
+        let object_id = hash_hex.clone();
 
-            let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
 
-            let object_row = ObjectRow {
-                id: object_id.clone(),
-                kind: "File".into(),
-                mime_type: None,
-                size_bytes: bytes_copied as i64,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                hash_state: hash_state::CONTENT.into(),
-            };
+        let object_row = ObjectRow {
+            id: object_id.clone(),
+            kind: "File".into(),
+            mime_type: None,
+            size_bytes: bytes_copied as i64,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            hash_state: hash_state::CONTENT.into(),
+        };
 
-            let location_row = LocationRow {
-                id: dest_location_id.clone(),
-                object_id: object_id.clone(),
-                volume_id: volume_id.clone(),
-                path: dest_str.to_string(),
-                name: dest_name,
-                extension: dest_extension,
-                parent_id: None,
-                is_directory: false,
-                size_bytes: bytes_copied as i64,
-                allocated_bytes: bytes_copied as i64,
-                created_at: now.clone(),
-                modified_at: now.clone(),
-                accessed_at: None,
-                fid: None,
-            };
+        let location_row = LocationRow {
+            id: dest_location_id.clone(),
+            object_id: object_id.clone(),
+            volume_id: volume_id.clone(),
+            path: dest_str.to_string(),
+            name: dest_name,
+            extension: dest_extension,
+            parent_id: None,
+            is_directory: false,
+            size_bytes: bytes_copied as i64,
+            allocated_bytes: bytes_copied as i64,
+            created_at: now.clone(),
+            modified_at: now.clone(),
+            accessed_at: None,
+            fid: None,
+        };
 
-            upsert_object(&ctx.index.pool, &object_row).await?;
-            upsert_location(&ctx.index.pool, &location_row).await?;
+        upsert_object(&ctx.index.pool, &object_row).await?;
+        upsert_location(&ctx.index.pool, &location_row).await?;
 
-            let inverse_action =
-                serde_json::json!({"action": "soft_delete", "paths": [dest_str]}).to_string();
+        let inverse_action =
+            serde_json::json!({"action": "soft_delete", "paths": [dest_str]}).to_string();
 
-            let entry = UndoEntry {
-                description: format!("Copied {} to {}", input.source_path, dest_str),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+        let entry = UndoEntry {
+            description: format!("Copied {} to {}", input.source_path, dest_str),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
 
-            Ok((CopyFileOutput { dest_location_id, bytes_copied }, entry))
+        Ok((
+            CopyFileOutput {
+                dest_location_id,
+                bytes_copied,
+            },
+            entry,
+        ))
     }
 }
 
@@ -179,7 +184,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -216,11 +223,10 @@ mod tests {
         assert_eq!(content, b"copy content");
 
         // DB has dest location
-        let loc =
-            lookup_location_by_path(&ctx.index.pool, "TEST", dest.to_str().unwrap())
-                .await
-                .unwrap()
-                .expect("location should exist");
+        let loc = lookup_location_by_path(&ctx.index.pool, "TEST", dest.to_str().unwrap())
+            .await
+            .unwrap()
+            .expect("location should exist");
         assert_eq!(loc.id, output.dest_location_id);
         assert!(!loc.is_directory);
 

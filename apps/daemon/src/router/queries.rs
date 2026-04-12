@@ -78,11 +78,7 @@ async fn volume_summary(
 ) -> impl IntoResponse {
     match queries::volume_summary(&ctx.index.pool, &params.volume_id).await {
         Ok(summary) => Json(summary).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("DB error: {e}"),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),
     }
 }
 
@@ -120,7 +116,13 @@ async fn stale(
     State(ctx): State<AppState>,
     Query(params): Query<StaleParams>,
 ) -> impl IntoResponse {
-    match queries::stale_files(&ctx.index.pool, &params.volume_id, params.days, params.limit).await
+    match queries::stale_files(
+        &ctx.index.pool,
+        &params.volume_id,
+        params.days,
+        params.limit,
+    )
+    .await
     {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),

@@ -3,8 +3,8 @@
 use crate::db::queries::{upsert_location, upsert_object};
 use crate::db::types::{hash_state, LocationRow, ObjectRow};
 use crate::domain::undo::UndoEntry;
-use crate::ops::{OpsError, OperationsContext};
 use crate::ops::registry::ActionMeta;
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -37,92 +37,92 @@ impl crate::ops::CoreAction for CreateDir {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            let path = Path::new(&input.path);
+        let path = Path::new(&input.path);
 
-            // Validate absolute path
-            if !path.is_absolute() {
-                return Err(OpsError::InvalidInput {
-                    reason: "path must be absolute".into(),
-                });
-            }
+        // Validate absolute path
+        if !path.is_absolute() {
+            return Err(OpsError::InvalidInput {
+                reason: "path must be absolute".into(),
+            });
+        }
 
-            // Validate parent exists
-            let parent = path.parent().ok_or_else(|| OpsError::InvalidInput {
-                reason: "path has no parent".into(),
-            })?;
-            if !parent.exists() {
-                return Err(OpsError::NotFound {
-                    path: parent.to_string_lossy().into_owned(),
-                });
-            }
+        // Validate parent exists
+        let parent = path.parent().ok_or_else(|| OpsError::InvalidInput {
+            reason: "path has no parent".into(),
+        })?;
+        if !parent.exists() {
+            return Err(OpsError::NotFound {
+                path: parent.to_string_lossy().into_owned(),
+            });
+        }
 
-            // Validate dest doesn't already exist
-            if path.exists() {
-                return Err(OpsError::AlreadyExists {
-                    path: input.path.clone(),
-                });
-            }
+        // Validate dest doesn't already exist
+        if path.exists() {
+            return Err(OpsError::AlreadyExists {
+                path: input.path.clone(),
+            });
+        }
 
-            // Create the directory
-            tokio::fs::create_dir(path).await.map_err(OpsError::Io)?;
+        // Create the directory
+        tokio::fs::create_dir(path).await.map_err(OpsError::Io)?;
 
-            let volume_id = &ctx.storage.volume_id;
-            let path_str = input.path.as_str();
+        let volume_id = &ctx.storage.volume_id;
+        let path_str = input.path.as_str();
 
-            // Compute location_id from volume+path
-            let location_id = {
-                let key = format!("{}:{}", volume_id, path_str);
-                let hex = blake3::hash(key.as_bytes()).to_hex();
-                hex[..32].to_string()
-            };
+        // Compute location_id from volume+path
+        let location_id = {
+            let key = format!("{}:{}", volume_id, path_str);
+            let hex = blake3::hash(key.as_bytes()).to_hex();
+            hex[..32].to_string()
+        };
 
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
-            let now = chrono::Utc::now().to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
 
-            let object_row = ObjectRow {
-                id: location_id.clone(),
-                kind: "Directory".into(),
-                mime_type: None,
-                size_bytes: 0,
-                created_at: now.clone(),
-                updated_at: now.clone(),
-                hash_state: hash_state::CONTENT.into(),
-            };
+        let object_row = ObjectRow {
+            id: location_id.clone(),
+            kind: "Directory".into(),
+            mime_type: None,
+            size_bytes: 0,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            hash_state: hash_state::CONTENT.into(),
+        };
 
-            let location_row = LocationRow {
-                id: location_id.clone(),
-                object_id: location_id.clone(),
-                volume_id: volume_id.clone(),
-                path: path_str.to_string(),
-                name: name.clone(),
-                extension: None,
-                parent_id: None,
-                is_directory: true,
-                size_bytes: 0,
-                allocated_bytes: 0,
-                created_at: now.clone(),
-                modified_at: now.clone(),
-                accessed_at: None,
-                fid: None,
-            };
+        let location_row = LocationRow {
+            id: location_id.clone(),
+            object_id: location_id.clone(),
+            volume_id: volume_id.clone(),
+            path: path_str.to_string(),
+            name: name.clone(),
+            extension: None,
+            parent_id: None,
+            is_directory: true,
+            size_bytes: 0,
+            allocated_bytes: 0,
+            created_at: now.clone(),
+            modified_at: now.clone(),
+            accessed_at: None,
+            fid: None,
+        };
 
-            upsert_object(&ctx.index.pool, &object_row).await?;
-            upsert_location(&ctx.index.pool, &location_row).await?;
+        upsert_object(&ctx.index.pool, &object_row).await?;
+        upsert_location(&ctx.index.pool, &location_row).await?;
 
-            let inverse_action =
-                serde_json::json!({"action": "soft_delete", "paths": [path_str]}).to_string();
+        let inverse_action =
+            serde_json::json!({"action": "soft_delete", "paths": [path_str]}).to_string();
 
-            let entry = UndoEntry {
-                description: format!("Created directory {}", name),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+        let entry = UndoEntry {
+            description: format!("Created directory {}", name),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
 
-            Ok((CreateDirOutput { location_id }, entry))
+        Ok((CreateDirOutput { location_id }, entry))
     }
 }
 
@@ -131,9 +131,9 @@ impl crate::ops::CoreAction for CreateDir {
 mod tests {
     use super::*;
     use crate::db::pool::{create_pool, run_migrations};
+    use crate::domain::id::DeviceId;
     use crate::domain::undo::UndoStack;
     use crate::ops::{CoreAction, IndexContext, OperationsContext, SessionContext, StorageContext};
-    use crate::domain::id::DeviceId;
     use redb::Database;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -171,7 +171,12 @@ mod tests {
 
         let action = CreateDir;
         let (output, entry) = action
-            .execute(&ctx, CreateDirInput { path: path_str.clone() })
+            .execute(
+                &ctx,
+                CreateDirInput {
+                    path: path_str.clone(),
+                },
+            )
             .await
             .expect("execute");
 
@@ -183,14 +188,10 @@ mod tests {
         assert_eq!(output.location_id.len(), 32);
 
         // Verify DB has the location
-        let loc = crate::db::queries::lookup_location_by_path(
-            &ctx.index.pool,
-            "TEST",
-            &path_str,
-        )
-        .await
-        .expect("lookup")
-        .expect("should exist");
+        let loc = crate::db::queries::lookup_location_by_path(&ctx.index.pool, "TEST", &path_str)
+            .await
+            .expect("lookup")
+            .expect("should exist");
 
         assert_eq!(loc.id, output.location_id);
         assert!(loc.is_directory);

@@ -3,7 +3,7 @@
 use crate::db::queries::lookup_location_by_path;
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -37,65 +37,63 @@ impl crate::ops::CoreAction for Rename {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            let path = Path::new(&input.path);
+        let path = Path::new(&input.path);
 
-            // Validate source exists
-            if !path.exists() {
-                return Err(OpsError::NotFound {
-                    path: input.path.clone(),
-                });
-            }
+        // Validate source exists
+        if !path.exists() {
+            return Err(OpsError::NotFound {
+                path: input.path.clone(),
+            });
+        }
 
-            // Validate new_name is non-empty
-            if input.new_name.is_empty() {
-                return Err(OpsError::InvalidInput {
-                    reason: "new_name must not be empty".into(),
-                });
-            }
+        // Validate new_name is non-empty
+        if input.new_name.is_empty() {
+            return Err(OpsError::InvalidInput {
+                reason: "new_name must not be empty".into(),
+            });
+        }
 
-            // Validate new_name has no path separators
-            if input.new_name.contains('/') || input.new_name.contains('\\') {
-                return Err(OpsError::InvalidInput {
-                    reason: "new_name must not contain path separators".into(),
-                });
-            }
+        // Validate new_name has no path separators
+        if input.new_name.contains('/') || input.new_name.contains('\\') {
+            return Err(OpsError::InvalidInput {
+                reason: "new_name must not contain path separators".into(),
+            });
+        }
 
-            let parent = path.parent().ok_or_else(|| OpsError::InvalidInput {
-                reason: "path has no parent".into(),
-            })?;
+        let parent = path.parent().ok_or_else(|| OpsError::InvalidInput {
+            reason: "path has no parent".into(),
+        })?;
 
-            let new_path = parent.join(&input.new_name);
-            let new_path_str = new_path.to_string_lossy().into_owned();
+        let new_path = parent.join(&input.new_name);
+        let new_path_str = new_path.to_string_lossy().into_owned();
 
-            // Validate dest doesn't already exist
-            if new_path.exists() {
-                return Err(OpsError::AlreadyExists {
-                    path: new_path_str.clone(),
-                });
-            }
+        // Validate dest doesn't already exist
+        if new_path.exists() {
+            return Err(OpsError::AlreadyExists {
+                path: new_path_str.clone(),
+            });
+        }
 
-            // Preserve old name for inverse
-            let old_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+        // Preserve old name for inverse
+        let old_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
 
-            // Perform the rename
-            tokio::fs::rename(path, &new_path)
-                .await
-                .map_err(OpsError::Io)?;
+        // Perform the rename
+        tokio::fs::rename(path, &new_path)
+            .await
+            .map_err(OpsError::Io)?;
 
-            // Update DB if location exists
-            let volume_id = &ctx.storage.volume_id;
-            if let Some(loc) =
-                lookup_location_by_path(&ctx.index.pool, volume_id, &input.path).await?
-            {
-                // Extract extension from new name
-                let new_extension: Option<String> = Path::new(&input.new_name)
-                    .extension()
-                    .map(|e| e.to_string_lossy().into_owned());
+        // Update DB if location exists
+        let volume_id = &ctx.storage.volume_id;
+        if let Some(loc) = lookup_location_by_path(&ctx.index.pool, volume_id, &input.path).await? {
+            // Extract extension from new name
+            let new_extension: Option<String> = Path::new(&input.new_name)
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned());
 
-                sqlx::query(
+            sqlx::query(
                     "UPDATE locations SET path=?1, name=?2, extension=?3, modified_at=datetime('now') WHERE id=?4",
                 )
                 .bind(&new_path_str)
@@ -104,22 +102,27 @@ impl crate::ops::CoreAction for Rename {
                 .bind(&loc.id)
                 .execute(&ctx.index.pool)
                 .await?;
-            }
+        }
 
-            let inverse_action = serde_json::json!({
-                "action": "rename",
-                "path": new_path_str,
-                "new_name": old_name,
-            })
-            .to_string();
+        let inverse_action = serde_json::json!({
+            "action": "rename",
+            "path": new_path_str,
+            "new_name": old_name,
+        })
+        .to_string();
 
-            let entry = UndoEntry {
-                description: format!("Renamed {} to {}", old_name, input.new_name),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+        let entry = UndoEntry {
+            description: format!("Renamed {} to {}", old_name, input.new_name),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
 
-            Ok((RenameOutput { new_path: new_path_str }, entry))
+        Ok((
+            RenameOutput {
+                new_path: new_path_str,
+            },
+            entry,
+        ))
     }
 }
 
@@ -151,7 +154,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -201,7 +206,10 @@ mod tests {
         let (output, entry) = action
             .execute(
                 &ctx,
-                RenameInput { path: src_str.clone(), new_name: "renamed.txt".into() },
+                RenameInput {
+                    path: src_str.clone(),
+                    new_name: "renamed.txt".into(),
+                },
             )
             .await
             .expect("execute");
@@ -213,11 +221,10 @@ mod tests {
         assert_eq!(output.new_path, new_path.to_str().unwrap());
 
         // DB updated
-        let updated =
-            lookup_location_by_path(&ctx.index.pool, "TEST", &output.new_path)
-                .await
-                .unwrap()
-                .expect("location at new path");
+        let updated = lookup_location_by_path(&ctx.index.pool, "TEST", &output.new_path)
+            .await
+            .unwrap()
+            .expect("location at new path");
         assert_eq!(updated.name, "renamed.txt");
         assert_eq!(updated.extension, Some("txt".into()));
 

@@ -3,7 +3,7 @@
 use crate::db::queries::lookup_location_by_path;
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -37,59 +37,59 @@ impl crate::ops::CoreAction for MoveFile {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            let source = Path::new(&input.source_path);
-            let dest = Path::new(&input.dest_path);
+        let source = Path::new(&input.source_path);
+        let dest = Path::new(&input.dest_path);
 
-            // Validate source exists
-            if !source.exists() {
-                return Err(OpsError::NotFound {
-                    path: input.source_path.clone(),
-                });
+        // Validate source exists
+        if !source.exists() {
+            return Err(OpsError::NotFound {
+                path: input.source_path.clone(),
+            });
+        }
+
+        // Validate dest parent exists
+        let dest_parent = dest.parent().ok_or_else(|| OpsError::InvalidInput {
+            reason: "dest_path has no parent".into(),
+        })?;
+        if !dest_parent.exists() {
+            return Err(OpsError::NotFound {
+                path: dest_parent.to_string_lossy().into_owned(),
+            });
+        }
+
+        // Validate dest does not already exist
+        if dest.exists() {
+            return Err(OpsError::AlreadyExists {
+                path: input.dest_path.clone(),
+            });
+        }
+
+        let dest_str = input.dest_path.as_str();
+
+        // Try fast same-volume rename first; fall back to copy+delete for cross-device
+        match tokio::fs::rename(source, dest).await {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(18) || e.raw_os_error() == Some(17) => {
+                // EXDEV (18 on Linux) or cross-device — copy then delete
+                tokio::fs::copy(source, dest).await.map_err(OpsError::Io)?;
+                tokio::fs::remove_file(source).await.map_err(OpsError::Io)?;
             }
+            Err(e) => return Err(OpsError::Io(e)),
+        }
 
-            // Validate dest parent exists
-            let dest_parent = dest.parent().ok_or_else(|| OpsError::InvalidInput {
-                reason: "dest_path has no parent".into(),
-            })?;
-            if !dest_parent.exists() {
-                return Err(OpsError::NotFound {
-                    path: dest_parent.to_string_lossy().into_owned(),
-                });
-            }
+        let volume_id = &ctx.storage.volume_id;
+        let dest_name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dest_extension: Option<String> =
+            dest.extension().map(|e| e.to_string_lossy().into_owned());
 
-            // Validate dest does not already exist
-            if dest.exists() {
-                return Err(OpsError::AlreadyExists {
-                    path: input.dest_path.clone(),
-                });
-            }
-
-            let dest_str = input.dest_path.as_str();
-
-            // Try fast same-volume rename first; fall back to copy+delete for cross-device
-            match tokio::fs::rename(source, dest).await {
-                Ok(()) => {}
-                Err(e) if e.raw_os_error() == Some(18) || e.raw_os_error() == Some(17) => {
-                    // EXDEV (18 on Linux) or cross-device — copy then delete
-                    tokio::fs::copy(source, dest).await.map_err(OpsError::Io)?;
-                    tokio::fs::remove_file(source).await.map_err(OpsError::Io)?;
-                }
-                Err(e) => return Err(OpsError::Io(e)),
-            }
-
-            let volume_id = &ctx.storage.volume_id;
-            let dest_name = dest
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let dest_extension: Option<String> =
-                dest.extension().map(|e| e.to_string_lossy().into_owned());
-
-            // Update DB location if source was tracked
-            if let Some(loc) =
-                lookup_location_by_path(&ctx.index.pool, volume_id, &input.source_path).await?
-            {
-                sqlx::query(
+        // Update DB location if source was tracked
+        if let Some(loc) =
+            lookup_location_by_path(&ctx.index.pool, volume_id, &input.source_path).await?
+        {
+            sqlx::query(
                     "UPDATE locations SET path=?1, name=?2, extension=?3, modified_at=datetime('now') WHERE id=?4",
                 )
                 .bind(dest_str)
@@ -98,22 +98,27 @@ impl crate::ops::CoreAction for MoveFile {
                 .bind(&loc.id)
                 .execute(&ctx.index.pool)
                 .await?;
-            }
+        }
 
-            let inverse_action = serde_json::json!({
-                "action": "move_file",
-                "source_path": dest_str,
-                "dest_path": input.source_path,
-            })
-            .to_string();
+        let inverse_action = serde_json::json!({
+            "action": "move_file",
+            "source_path": dest_str,
+            "dest_path": input.source_path,
+        })
+        .to_string();
 
-            let entry = UndoEntry {
-                description: format!("Moved {} to {}", input.source_path, dest_str),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+        let entry = UndoEntry {
+            description: format!("Moved {} to {}", input.source_path, dest_str),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
 
-            Ok((MoveFileOutput { new_path: dest_str.to_string() }, entry))
+        Ok((
+            MoveFileOutput {
+                new_path: dest_str.to_string(),
+            },
+            entry,
+        ))
     }
 }
 
@@ -145,7 +150,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -205,7 +212,10 @@ mod tests {
         let (output, entry) = action
             .execute(
                 &ctx,
-                MoveFileInput { source_path: src_str.clone(), dest_path: dest_str.clone() },
+                MoveFileInput {
+                    source_path: src_str.clone(),
+                    dest_path: dest_str.clone(),
+                },
             )
             .await
             .expect("execute");

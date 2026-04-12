@@ -2120,7 +2120,13 @@ mod tests {
         .unwrap();
     }
 
-    async fn p9_insert_location(pool: &SqlitePool, loc_id: &str, obj_id: &str, volume_id: &str, path: &str) {
+    async fn p9_insert_location(
+        pool: &SqlitePool,
+        loc_id: &str,
+        obj_id: &str,
+        volume_id: &str,
+        path: &str,
+    ) {
         let name = std::path::Path::new(path)
             .file_name()
             .unwrap()
@@ -2218,10 +2224,9 @@ mod tests {
             .await
             .unwrap();
 
-        let removed =
-            remove_tags_batch(&pool, "tag1", &["obj1".to_string(), "obj2".to_string()])
-                .await
-                .unwrap();
+        let removed = remove_tags_batch(&pool, "tag1", &["obj1".to_string(), "obj2".to_string()])
+            .await
+            .unwrap();
         assert_eq!(removed, 2);
 
         let rows: Vec<(String,)> =

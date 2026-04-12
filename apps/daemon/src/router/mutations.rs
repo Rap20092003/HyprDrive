@@ -3,13 +3,7 @@
 //! Each endpoint deserializes a JSON body into the action's `Input`,
 //! calls `execute()`, pushes the undo entry, and returns the `Output`.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde_json::Value;
 
 use hyprdrive_core::domain::undo::UndoEntry;
@@ -59,7 +53,9 @@ async fn action_create_dir(
     Json(input): Json<create_dir::CreateDirInput>,
 ) -> impl IntoResponse {
     match run_action(&create_dir::CreateDir, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -69,7 +65,9 @@ async fn action_rename(
     Json(input): Json<rename::RenameInput>,
 ) -> impl IntoResponse {
     match run_action(&rename::Rename, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -79,7 +77,9 @@ async fn action_copy_file(
     Json(input): Json<copy_file::CopyFileInput>,
 ) -> impl IntoResponse {
     match run_action(&copy_file::CopyFile, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -89,7 +89,9 @@ async fn action_move_file(
     Json(input): Json<move_file::MoveFileInput>,
 ) -> impl IntoResponse {
     match run_action(&move_file::MoveFile, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -99,7 +101,9 @@ async fn action_soft_delete(
     Json(input): Json<soft_delete::SoftDeleteInput>,
 ) -> impl IntoResponse {
     match run_action(&soft_delete::SoftDelete, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -109,7 +113,9 @@ async fn action_bulk_tag(
     Json(input): Json<bulk_tag::BulkTagInput>,
 ) -> impl IntoResponse {
     match run_action(&bulk_tag::BulkTag, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -119,7 +125,9 @@ async fn action_empty_trash(
     Json(input): Json<empty_trash::EmptyTrashInput>,
 ) -> impl IntoResponse {
     match run_action(&empty_trash::EmptyTrash, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }
@@ -129,7 +137,9 @@ async fn action_smart_rename(
     Json(input): Json<smart_rename::SmartRenameInput>,
 ) -> impl IntoResponse {
     match run_action(&smart_rename::SmartRename, &ctx, input).await {
-        Ok((output, _)) => Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response(),
+        Ok((output, _)) => {
+            Json(serde_json::to_value(output).unwrap_or(Value::Null)).into_response()
+        }
         Err((status, msg)) => (status, msg).into_response(),
     }
 }

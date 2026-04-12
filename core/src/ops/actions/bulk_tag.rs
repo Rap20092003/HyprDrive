@@ -3,7 +3,7 @@
 use crate::db::queries::{add_tags_batch, remove_tags_batch};
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 
 inventory::submit! {
@@ -38,58 +38,66 @@ impl crate::ops::CoreAction for BulkTag {
         ctx: &OperationsContext,
         input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            // Validate operation
-            if input.operation != "add" && input.operation != "remove" {
-                return Err(OpsError::InvalidInput {
-                    reason: format!(
-                        "operation must be 'add' or 'remove', got '{}'",
-                        input.operation
-                    ),
-                });
-            }
-
-            // Validate tag_id non-empty
-            if input.tag_id.is_empty() {
-                return Err(OpsError::InvalidInput {
-                    reason: "tag_id must not be empty".into(),
-                });
-            }
-
-            // Validate object_ids non-empty
-            if input.object_ids.is_empty() {
-                return Err(OpsError::InvalidInput {
-                    reason: "object_ids must not be empty".into(),
-                });
-            }
-
-            let affected_count = if input.operation == "add" {
-                add_tags_batch(&ctx.index.pool, &input.tag_id, &input.object_ids).await?
-            } else {
-                remove_tags_batch(&ctx.index.pool, &input.tag_id, &input.object_ids).await?
-            };
-
-            // Inverse flips the operation
-            let reverse_op = if input.operation == "add" { "remove" } else { "add" };
-            let inverse_action = serde_json::json!({
-                "action": "bulk_tag",
-                "object_ids": input.object_ids,
-                "tag_id": input.tag_id,
-                "operation": reverse_op,
-            })
-            .to_string();
-
-            let entry = UndoEntry {
-                description: format!(
-                    "{}d tag '{}' on {} object(s)",
-                    if input.operation == "add" { "Add" } else { "Remove" },
-                    input.tag_id,
-                    input.object_ids.len(),
+        // Validate operation
+        if input.operation != "add" && input.operation != "remove" {
+            return Err(OpsError::InvalidInput {
+                reason: format!(
+                    "operation must be 'add' or 'remove', got '{}'",
+                    input.operation
                 ),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+            });
+        }
 
-            Ok((BulkTagOutput { affected_count }, entry))
+        // Validate tag_id non-empty
+        if input.tag_id.is_empty() {
+            return Err(OpsError::InvalidInput {
+                reason: "tag_id must not be empty".into(),
+            });
+        }
+
+        // Validate object_ids non-empty
+        if input.object_ids.is_empty() {
+            return Err(OpsError::InvalidInput {
+                reason: "object_ids must not be empty".into(),
+            });
+        }
+
+        let affected_count = if input.operation == "add" {
+            add_tags_batch(&ctx.index.pool, &input.tag_id, &input.object_ids).await?
+        } else {
+            remove_tags_batch(&ctx.index.pool, &input.tag_id, &input.object_ids).await?
+        };
+
+        // Inverse flips the operation
+        let reverse_op = if input.operation == "add" {
+            "remove"
+        } else {
+            "add"
+        };
+        let inverse_action = serde_json::json!({
+            "action": "bulk_tag",
+            "object_ids": input.object_ids,
+            "tag_id": input.tag_id,
+            "operation": reverse_op,
+        })
+        .to_string();
+
+        let entry = UndoEntry {
+            description: format!(
+                "{}d tag '{}' on {} object(s)",
+                if input.operation == "add" {
+                    "Add"
+                } else {
+                    "Remove"
+                },
+                input.tag_id,
+                input.object_ids.len(),
+            ),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
+
+        Ok((BulkTagOutput { affected_count }, entry))
     }
 }
 
@@ -98,7 +106,7 @@ impl crate::ops::CoreAction for BulkTag {
 mod tests {
     use super::*;
     use crate::db::pool::{create_pool, run_migrations};
-    use crate::db::queries::{upsert_object, tags_for_object};
+    use crate::db::queries::{tags_for_object, upsert_object};
     use crate::db::types::{hash_state, ObjectRow};
     use crate::domain::id::DeviceId;
     use crate::domain::undo::UndoStack;
@@ -121,7 +129,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
@@ -183,7 +193,9 @@ mod tests {
             .expect("add execute");
 
         assert_eq!(add_output.affected_count, 2);
-        let tags = tags_for_object(&ctx.index.pool, &object_ids[0]).await.unwrap();
+        let tags = tags_for_object(&ctx.index.pool, &object_ids[0])
+            .await
+            .unwrap();
         assert_eq!(tags.len(), 1);
 
         // Verify inverse JSON
@@ -204,7 +216,9 @@ mod tests {
             .expect("remove execute");
 
         assert_eq!(remove_output.affected_count, 2);
-        let tags_after = tags_for_object(&ctx.index.pool, &object_ids[0]).await.unwrap();
+        let tags_after = tags_for_object(&ctx.index.pool, &object_ids[0])
+            .await
+            .unwrap();
         assert!(tags_after.is_empty());
     }
 }

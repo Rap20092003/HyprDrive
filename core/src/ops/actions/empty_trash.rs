@@ -6,7 +6,7 @@
 
 use crate::domain::undo::UndoEntry;
 use crate::ops::registry::ActionMeta;
-use crate::ops::{OpsError, OperationsContext};
+use crate::ops::{OperationsContext, OpsError};
 use serde::{Deserialize, Serialize};
 
 inventory::submit! {
@@ -36,19 +36,19 @@ impl crate::ops::CoreAction for EmptyTrash {
         _ctx: &OperationsContext,
         _input: Self::Input,
     ) -> Result<(Self::Output, UndoEntry), OpsError> {
-            tracing::info!(
-                "EmptyTrash: files moved to system trash; OS-level purge not available via API"
-            );
+        tracing::info!(
+            "EmptyTrash: files moved to system trash; OS-level purge not available via API"
+        );
 
-            let inverse_action = serde_json::json!({"action": "noop"}).to_string();
+        let inverse_action = serde_json::json!({"action": "noop"}).to_string();
 
-            let entry = UndoEntry {
-                description: "Empty Trash (cannot undo)".into(),
-                timestamp: chrono::Utc::now(),
-                inverse_action,
-            };
+        let entry = UndoEntry {
+            description: "Empty Trash (cannot undo)".into(),
+            timestamp: chrono::Utc::now(),
+            inverse_action,
+        };
 
-            Ok((EmptyTrashOutput { success: true }, entry))
+        Ok((EmptyTrashOutput { success: true }, entry))
     }
 }
 
@@ -78,7 +78,9 @@ mod tests {
                 source: "test".into(),
                 correlation_id: None,
             },
-            storage: StorageContext { volume_id: "TEST".into() },
+            storage: StorageContext {
+                volume_id: "TEST".into(),
+            },
             index: IndexContext { pool, cache },
             undo_stack: Arc::new(Mutex::new(UndoStack::new())),
         }
